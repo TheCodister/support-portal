@@ -1,0 +1,10 @@
+node_modules
+.next
+dist
+coverage
+.env
+.env.local
+cdk.out
+.DS_Store
+*.tsbuildinfo
+.gstack/
