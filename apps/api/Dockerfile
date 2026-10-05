@@ -10,6 +10,8 @@ FROM node:24-alpine
 RUN corepack enable
 WORKDIR /app
 ENV NODE_ENV=production
+RUN wget -q https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem -O /app/rds-global-bundle.pem
+ENV NODE_EXTRA_CA_CERTS=/app/rds-global-bundle.pem
 COPY --from=build /app ./
 USER node
 EXPOSE 4000

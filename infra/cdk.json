@@ -1,1 +1,1 @@
-{"app":"pnpm tsx bin/app.ts","context":{"stage":"learning","minApiTasks":1,"maxApiTasks":4}}
+{"app":"pnpm tsx bin/app.ts","context":{"stage":"learning","minApiTasks":1}}
