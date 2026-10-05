@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { requestOptions } from "./request-headers";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 type Membership = { organization_id: string; name: string; role: "requester" | "agent" | "admin" };
@@ -32,7 +33,7 @@ function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
 
 let csrfToken = "";
 async function request<T>(path: string, init: RequestInit = {}, organizationId?: string): Promise<T> {
-  const response = await fetch(`${API}${path}`, { ...init, credentials: "include", headers: { "content-type": "application/json", ...(organizationId ? { "x-organization-id": organizationId } : {}), ...(!["GET", "HEAD"].includes(init.method ?? "GET") ? { "x-csrf-token": csrfToken } : {}), ...init.headers } });
+  const response = await fetch(`${API}${path}`, { ...requestOptions(init, csrfToken, organizationId), credentials: "include" });
   if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.message ?? `Request failed (${response.status})`); }
   if (response.status === 204) { if (path === "/v1/auth/logout") csrfToken = ""; return undefined as T; }
   const body = await response.json();
@@ -121,7 +122,7 @@ function GlobalNav({ user, onLogout }: { user: Session["user"]; onLogout: () => 
 function Login({ onLogin }: { onLogin: (session: Session) => void }) {
   const [error, setError] = useState(""); const [busy, setBusy] = useState(false);
   async function submit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); setBusy(true); setError(""); const data = new FormData(event.currentTarget); try { onLogin(await request<Session>("/v1/auth/login", { method: "POST", body: JSON.stringify({ email: data.get("email"), password: data.get("password") }) })); } catch (caught) { setError((caught as Error).message); } finally { setBusy(false); } }
-  return <main className="login-page"><header className="global-nav"><div className="global-nav-inner login-nav"><span className="global-brand"><Icon name="logo" size={22}/><span>SupportDesk</span></span><span>Thoughtful support, organized.</span></div></header><section className="login-hero"><div className="login-message"><p className="overline">SUPPORTDESK</p><h1>Support that feels<br/>more human.</h1><p>A focused place for your team to listen carefully, respond clearly, and keep every promise.</p></div><form className="login-card" onSubmit={submit}><div><p className="overline">WELCOME BACK</p><h2>Sign in</h2><p>Continue to your support workspace.</p></div><label>Email address<input name="email" type="email" defaultValue="admin@acme.test" autoComplete="email" required/></label><label>Password<input name="password" type="password" defaultValue="supportdesk-demo" autoComplete="current-password" required/></label>{error && <p className="form-error">{error}</p>}<button className="button-primary login-submit" disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button><p className="demo-note">Demo access: admin@acme.test</p></form></section><footer className="login-footer"><span>SupportDesk</span><span>Private by design. Built for clear conversations.</span></footer></main>;
+  return <main className="login-page"><header className="global-nav"><div className="global-nav-inner login-nav"><span className="global-brand"><Icon name="logo" size={22}/><span>SupportDesk</span></span><span>Thoughtful support, organized.</span></div></header><section className="login-hero"><div className="login-message"><p className="overline">SUPPORTDESK</p><h1>Support that feels<br/>more human.</h1><p>A focused place for your team to listen carefully, respond clearly, and keep every promise.</p></div><form className="login-card" onSubmit={submit}><div><p className="overline">WELCOME BACK</p><h2>Sign in</h2><p>Continue to your support workspace.</p></div><label>Email address<input name="email" type="email" defaultValue="admin@acme.test" autoComplete="email" required/></label><label>Password<input name="password" type="password" autoComplete="current-password" required/></label>{error && <p className="form-error">{error}</p>}<button className="button-primary login-submit" disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button><p className="demo-note">Demo access: admin@acme.test</p></form></section><footer className="login-footer"><span>SupportDesk</span><span>Private by design. Built for clear conversations.</span></footer></main>;
 }
 
 function EmptyTickets({ onCreate }: { onCreate: () => void }) { return <div className="empty-tickets"><span className="empty-icon"><Icon name="inbox" size={28}/></span><h2>Your inbox is clear.</h2><p>No tickets match this view.</p><button className="text-button" onClick={onCreate}>Create a ticket</button></div>; }
