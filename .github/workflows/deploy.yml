@@ -1,0 +1,145 @@
+name: deploy
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One deploy at a time, in merge order; never cancel a deploy halfway through a migration or stack update.
+concurrency:
+  group: deploy-learning
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  STACK_NAME: SupportDesk
+
+jobs:
+  verify:
+    uses: ./.github/workflows/verify.yml
+
+  # The learning demo deletes itself on a schedule. Skip, rather than recreate it, once it is gone.
+  preflight:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions: { id-token: write, contents: read }
+    outputs:
+      live: ${{ steps.check.outputs.live }}
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: true
+      - id: check
+        run: |
+          status=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo MISSING)
+          app=$(aws amplify get-app --app-id "${{ vars.AMPLIFY_APP_ID }}" --query 'app.appId' --output text 2>/dev/null || echo MISSING)
+          case "$status" in
+            CREATE_COMPLETE|UPDATE_COMPLETE|UPDATE_ROLLBACK_COMPLETE) ;;
+            *) echo "::notice::Skipping deploy: stack $STACK_NAME is $status."; echo "live=false" >> "$GITHUB_OUTPUT"; exit 0 ;;
+          esac
+          if [ "$app" = MISSING ]; then echo "::notice::Skipping deploy: Amplify app is gone."; echo "live=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          echo "live=true" >> "$GITHUB_OUTPUT"
+
+  api:
+    needs: preflight
+    if: needs.preflight.outputs.live == 'true'
+    runs-on: ubuntu-24.04-arm
+    permissions: { id-token: write, contents: read }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: true
+      - name: Read stack outputs
+        run: |
+          aws cloudformation describe-stacks --stack-name "$STACK_NAME" --query 'Stacks[0].Outputs' --output json > outputs.json
+          out() { jq -r --arg key "$1" '.[] | select(.OutputKey == $key) | .OutputValue' outputs.json; }
+          {
+            echo "REPOSITORY_URI=$(out RepositoryUri)"
+            echo "CLUSTER=$(out ClusterName)"
+            echo "MIGRATE_FAMILY=$(out MigrateTaskFamily)"
+            echo "SUBNETS=$(out TaskSubnetIds)"
+            echo "SECURITY_GROUP=$(out TaskSecurityGroupId)"
+            echo "IMAGE_TAG=${GITHUB_SHA}"
+          } >> "$GITHUB_ENV"
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - name: Build and push the API image
+        run: |
+          docker build -f apps/api/Dockerfile -t "$REPOSITORY_URI:$IMAGE_TAG" .
+          docker push "$REPOSITORY_URI:$IMAGE_TAG"
+      # The first run happens before this stack update creates the migrate task; later runs use it.
+      - name: Run database migrations
+        if: env.MIGRATE_FAMILY != ''
+        run: |
+          aws ecs describe-task-definition --task-definition "$MIGRATE_FAMILY" --query taskDefinition --output json \
+            | jq --arg image "$REPOSITORY_URI:$IMAGE_TAG" '.containerDefinitions[0].image = $image | {family, taskRoleArn, executionRoleArn, networkMode, containerDefinitions, requiresCompatibilities, cpu, memory, runtimePlatform}' > migrate.json
+          definition=$(aws ecs register-task-definition --cli-input-json file://migrate.json --query taskDefinition.taskDefinitionArn --output text)
+          task=$(aws ecs run-task --cluster "$CLUSTER" --launch-type FARGATE --task-definition "$definition" \
+            --network-configuration "awsvpcConfiguration={subnets=[$SUBNETS],securityGroups=[$SECURITY_GROUP],assignPublicIp=ENABLED}" \
+            --query 'tasks[0].taskArn' --output text)
+          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$task"
+          code=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$task" --query 'tasks[0].containers[0].exitCode' --output text)
+          if [ "$code" != 0 ]; then
+            reason=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$task" --query 'tasks[0].stoppedReason' --output text)
+            echo "::error::Migration task exited with $code ($reason). Check the api log group, stream prefix migrate."
+            exit 1
+          fi
+      - uses: pnpm/action-setup@v4
+        with: { version: 10.13.1 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - name: Deploy the SupportDesk stack
+        working-directory: infra
+        run: pnpm exec cdk deploy "$STACK_NAME" --require-approval never --ci -c imageTag="$IMAGE_TAG" -c webOrigin="${{ vars.WEB_ORIGIN }}"
+
+  web:
+    needs: api
+    runs-on: ubuntu-latest
+    permissions: { id-token: write, contents: read }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 10.13.1 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @supportdesk/web build
+        env: { STATIC_EXPORT: "true", NEXT_PUBLIC_API_URL: /api }
+      - run: cd apps/web/out && zip -qr "$GITHUB_WORKSPACE/site.zip" .
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: true
+      - name: Deploy to Amplify
+        env: { APP_ID: "${{ vars.AMPLIFY_APP_ID }}", BRANCH: "${{ vars.AMPLIFY_BRANCH || 'main' }}" }
+        run: |
+          read -r job url < <(aws amplify create-deployment --app-id "$APP_ID" --branch-name "$BRANCH" --query '[jobId,zipUploadUrl]' --output text)
+          curl -fsS --retry 3 -T site.zip "$url"
+          aws amplify start-deployment --app-id "$APP_ID" --branch-name "$BRANCH" --job-id "$job" > /dev/null
+          for _ in $(seq 1 60); do
+            status=$(aws amplify get-job --app-id "$APP_ID" --branch-name "$BRANCH" --job-id "$job" --query 'job.summary.status' --output text)
+            case "$status" in
+              SUCCEED) echo "Amplify job $job succeeded"; exit 0 ;;
+              FAILED|CANCELLED) echo "::error::Amplify job $job $status"; exit 1 ;;
+            esac
+            sleep 10
+          done
+          echo "::error::Amplify job $job did not finish in 10 minutes"; exit 1
+
+  smoke:
+    needs: web
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the site and API through the public origin
+        run: |
+          curl -fsS --retry 5 --retry-delay 10 -o /dev/null "${{ vars.WEB_ORIGIN }}/"
+          curl -fsS --retry 5 --retry-delay 10 "${{ vars.WEB_ORIGIN }}/api/health/ready"
