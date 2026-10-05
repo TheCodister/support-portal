@@ -12,4 +12,4 @@ if (demoExpiresAt || amplifyAppId) {
   if (!demoExpiresAt || Number.isNaN(new Date(demoExpiresAt).getTime())) throw new Error("demoExpiresAt is required for demo expiry");
   new DemoExpiryStack(app, "SupportDeskDemoExpiry", { env, amplifyAppId, expiresAt: new Date(demoExpiresAt) });
 }
-new GitHubDeployStack(app, "SupportDeskGitHubDeploy", { env, repository: app.node.tryGetContext("githubRepository") ?? "TheCodister/support-portal", branch: app.node.tryGetContext("deployBranch") ?? "main", amplifyAppId });
+new GitHubDeployStack(app, "SupportDeskGitHubDeploy", { env, subjectPrefix: app.node.tryGetContext("githubSubjectPrefix") ?? "repo:TheCodister@117727037/support-portal@1394751656", branch: app.node.tryGetContext("deployBranch") ?? "main", amplifyAppId });
