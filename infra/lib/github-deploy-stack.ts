@@ -3,7 +3,8 @@ import { Effect, OpenIdConnectProvider, PolicyStatement, Role, WebIdentityPrinci
 import { Construct } from "constructs";
 
 export interface GitHubDeployProps extends StackProps {
-  repository: string;
+  /** OIDC `sub` prefix. Repositories using GitHub's immutable subject format send `repo:<owner>@<ownerId>/<repo>@<repoId>`. */
+  subjectPrefix: string;
   branch: string;
   amplifyAppId?: string;
 }
@@ -17,10 +18,10 @@ export class GitHubDeployStack extends Stack {
 
     const provider = new OpenIdConnectProvider(this, "GitHubOidc", { url: "https://token.actions.githubusercontent.com", clientIds: ["sts.amazonaws.com"] });
     const role = new Role(this, "DeployRole", {
-      description: `Deploys SupportDesk from ${props.repository}@${props.branch}`,
+      description: `Deploys SupportDesk from ${props.subjectPrefix}:${props.branch}`,
       maxSessionDuration: Duration.hours(1),
       assumedBy: new WebIdentityPrincipal(provider.openIdConnectProviderArn, {
-        StringEquals: { "token.actions.githubusercontent.com:aud": "sts.amazonaws.com", "token.actions.githubusercontent.com:sub": `repo:${props.repository}:ref:refs/heads/${props.branch}` }
+        StringEquals: { "token.actions.githubusercontent.com:aud": "sts.amazonaws.com", "token.actions.githubusercontent.com:sub": `${props.subjectPrefix}:ref:refs/heads/${props.branch}` }
       })
     });
     const account = this.account; const region = this.region;

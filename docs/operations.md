@@ -43,7 +43,7 @@ Every push to `main` runs `.github/workflows/deploy.yml` against the learning st
 
 Pull requests and other branches run only `verify`. Runs are serialized and never cancelled mid-deploy. Because migrations run before the new API image and the previous frontend keeps serving until the web job finishes, migrations must stay additive (expand, then contract in a later release).
 
-GitHub Actions authenticates through OIDC with the role in the `SupportDeskGitHubDeploy` stack, which only trusts `refs/heads/main` of the repository. No AWS keys are stored in GitHub.
+GitHub Actions authenticates through OIDC with the role in the `SupportDeskGitHubDeploy` stack, which only trusts `refs/heads/main` of the repository. The repository uses GitHub's immutable OIDC subject (`repo:<owner>@<ownerId>/<repo>@<repoId>`); if the repository is moved, read the new prefix with `gh api repos/<owner>/<repo>/actions/oidc/customization/sub` and pass it as `-c githubSubjectPrefix=...`. No AWS keys are stored in GitHub.
 
 One-time setup (an AWS admin runs this locally; it also sets the demo expiry date):
 
