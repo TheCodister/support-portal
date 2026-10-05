@@ -1,6 +1,6 @@
 # SupportDesk
 
-A multi-tenant support platform built as a modular monolith with a Next.js frontend, Fastify API, PostgreSQL, private S3-compatible attachments, and a durable outbox worker. AWS CDK definitions deploy the frontend to Amplify Hosting and the container workloads to ECS Fargate. LocalStack emulates private S3 locally.
+A multi-tenant support platform built as a modular monolith with a Next.js frontend, Fastify API, PostgreSQL, private S3-compatible attachments, an admin-authored knowledge base (Tiptap editor with Markdown paste; images in the same private bucket), and a durable outbox worker. AWS CDK definitions deploy the frontend to Amplify Hosting and the container workloads to ECS Fargate. LocalStack emulates private S3 locally.
 
 ## Local quick start
 

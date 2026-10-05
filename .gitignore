@@ -5,6 +5,8 @@ coverage
 .env
 .env.local
 cdk.out
+cdk.context.json
+out
 .DS_Store
 *.tsbuildinfo
 .gstack/

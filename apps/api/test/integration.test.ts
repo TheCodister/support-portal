@@ -38,6 +38,25 @@ describe.runIf(process.env.RUN_INTEGRATION_TESTS === "true")("tenant and visibil
     expect(response.statusCode).toBe(200);
     expect(response.json().csrfToken).toBe(acmeCsrf);
   });
+  it("lets only admins publish knowledge articles that stay inside the organization", async () => {
+    const requesterHeaders = { cookie: acmeCookie, "x-csrf-token": acmeCsrf, "x-organization-id": acmeOrg };
+    const denied = await app.inject({ method: "POST", url: "/v1/knowledge/articles", headers: requesterHeaders, payload: { title: "Requester article", body: "Not allowed" } });
+    expect(denied.statusCode).toBe(403);
+    const admin = await login("admin@acme.test");
+    const adminHeaders = { cookie: admin.cookie, "x-csrf-token": admin.csrf, "x-organization-id": acmeOrg };
+    const created = await app.inject({ method: "POST", url: "/v1/knowledge/articles", headers: adminHeaders, payload: { title: "Integration knowledge", body: "# Heading\n\nBody text" } });
+    expect(created.statusCode).toBe(201);
+    const { id, version } = created.json();
+    const viewed = await app.inject({ method: "GET", url: `/v1/knowledge/articles/${id}`, headers: requesterHeaders });
+    expect(viewed.statusCode).toBe(200);
+    expect(viewed.json().body).toBe("# Heading\n\nBody text");
+    const updated = await app.inject({ method: "PATCH", url: `/v1/knowledge/articles/${id}`, headers: adminHeaders, payload: { title: "Integration knowledge", body: "Updated", version } });
+    expect(updated.statusCode).toBe(200);
+    const stale = await app.inject({ method: "PATCH", url: `/v1/knowledge/articles/${id}`, headers: adminHeaders, payload: { title: "Integration knowledge", body: "Stale", version } });
+    expect(stale.statusCode).toBe(409);
+    const hidden = await app.inject({ method: "GET", url: `/v1/knowledge/articles/${id}`, headers: { cookie: globexCookie, "x-organization-id": globexOrg } });
+    expect(hidden.statusCode).toBe(404);
+  });
   it("returns every matching ticket exactly once across cursor pages", async () => {
     const marker = `pagination${crypto.randomUUID().replaceAll("-", "")}`;
     const headers = { cookie: acmeCookie, "x-csrf-token": acmeCsrf, "x-organization-id": acmeOrg };

@@ -1,9 +1,10 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import { requestOptions } from "./request-headers";
+import dynamic from "next/dynamic";
+import { request } from "./api";
+import { Icon } from "./icons";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 type Membership = { organization_id: string; name: string; role: "requester" | "agent" | "admin" };
 type Session = { user: { id: string; email: string; displayName: string }; memberships: Membership[]; csrfToken: string };
 type Ticket = { id: string; title: string; description: string; status: string; priority: string; version: number; requester_name: string; assignee_id?: string; assignee_name?: string; created_at: string; comments?: Comment[]; activity?: Activity[]; attachments?: Attachment[] };
@@ -11,35 +12,8 @@ type Comment = { id: string; body: string; visibility: string; author_name: stri
 type Activity = { id: string; action: string; actor_name?: string; created_at: string };
 type Attachment = { id: string; file_name: string; size_bytes: number };
 type Member = { id: string; display_name: string; role: string };
-type IconName = "logo" | "search" | "plus" | "inbox" | "people" | "chart" | "logout" | "paperclip" | "download" | "back" | "close";
 
-function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
-  const common = { width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round" as const, strokeLinejoin: "round" as const, "aria-hidden": true };
-  const paths: Record<IconName, React.ReactNode> = {
-    logo: <><rect x="5" y="4" width="14" height="16" rx="4"/><path d="M9 9.5h6M9 13h6M9 16.5h3"/></>,
-    search: <><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></>,
-    plus: <><path d="M12 5v14M5 12h14"/></>,
-    inbox: <><path d="M4 5h16v14H4z"/><path d="M4 14h4l2 2h4l2-2h4"/></>,
-    people: <><circle cx="9" cy="8" r="3"/><path d="M3.5 19c.5-4 2.5-6 5.5-6s5 2 5.5 6"/><path d="M15 5.5a3 3 0 0 1 0 5.5M16 13c2.5.5 4 2.5 4.5 5"/></>,
-    chart: <><path d="M5 19V9M12 19V5M19 19v-7"/></>,
-    logout: <><path d="M10 5H5v14h5M14 8l4 4-4 4M8 12h10"/></>,
-    paperclip: <path d="m8 12.5 6.2-6.2a3 3 0 0 1 4.2 4.2L10.2 18.7a5 5 0 0 1-7.1-7.1l8-8"/>,
-    download: <><path d="M12 4v11M8 11l4 4 4-4M5 20h14"/></>,
-    back: <path d="m15 18-6-6 6-6"/>,
-    close: <><path d="m6 6 12 12M18 6 6 18"/></>
-  };
-  return <svg {...common}>{paths[name]}</svg>;
-}
-
-let csrfToken = "";
-async function request<T>(path: string, init: RequestInit = {}, organizationId?: string): Promise<T> {
-  const response = await fetch(`${API}${path}`, { ...requestOptions(init, csrfToken, organizationId), credentials: "include" });
-  if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.message ?? `Request failed (${response.status})`); }
-  if (response.status === 204) { if (path === "/v1/auth/logout") csrfToken = ""; return undefined as T; }
-  const body = await response.json();
-  if ((path === "/v1/auth/login" || path === "/v1/auth/me") && typeof body.csrfToken === "string") csrfToken = body.csrfToken;
-  return body as T;
-}
+const Knowledge = dynamic(() => import("./knowledge").then((module) => module.Knowledge), { ssr: false, loading: () => <main className="loading-screen"><span className="loader"/></main> });
 
 export function Desk() {
   const [session, setSession] = useState<Session | null>();
@@ -53,6 +27,7 @@ export function Desk() {
   const [ticketQuery, setTicketQuery] = useState("");
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [view, setView] = useState<"tickets" | "knowledge">("tickets");
   const listRequestId = useRef(0);
   const membership = session?.memberships.find((item) => item.organization_id === orgId);
 
@@ -92,14 +67,15 @@ export function Desk() {
   function search(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const value = searchValue.trim(); const query = value ? `search=${encodeURIComponent(value)}` : ""; setActiveStatus(""); setTicketQuery(query); setSelected(null); void loadTickets(orgId, query); }
 
   return <div className="app-shell">
-    <GlobalNav user={session.user} onLogout={() => void logout()}/>
+    <GlobalNav user={session.user} view={view} onView={setView} onLogout={() => void logout()}/>
     <nav className="workspace-nav" aria-label="Workspace navigation"><div className="nav-container">
       <div className="workspace-identity"><strong>SupportDesk</strong><span className="workspace-divider"/><label><span className="sr-only">Workspace</span><select value={orgId} onChange={(event) => { setOrgId(event.target.value); setSelected(null); setActiveStatus(""); setSearchValue(""); setTicketQuery(""); void loadTickets(event.target.value); }}>{session.memberships.map((item) => <option key={item.organization_id} value={item.organization_id}>{item.name}</option>)}</select></label></div>
-      <div className="workspace-links" aria-label="Primary"><button className="current"><Icon name="inbox" size={16}/>Tickets</button><button disabled><Icon name="people" size={16}/>Customers</button><button disabled><Icon name="chart" size={16}/>Reports</button></div>
-      <button className="button-primary button-compact" onClick={() => setShowNew(true)}><Icon name="plus" size={16}/>New ticket</button>
+      <div className="workspace-links" aria-label="Primary"><button className={view === "tickets" ? "current" : ""} aria-current={view === "tickets" ? "page" : undefined} onClick={() => setView("tickets")}><Icon name="inbox" size={16}/>Tickets</button><button className={view === "knowledge" ? "current" : ""} aria-current={view === "knowledge" ? "page" : undefined} onClick={() => setView("knowledge")}><Icon name="book" size={16}/>Knowledge</button><button disabled><Icon name="people" size={16}/>Customers</button><button disabled><Icon name="chart" size={16}/>Reports</button></div>
+      <button className="view-switch" onClick={() => setView(view === "tickets" ? "knowledge" : "tickets")} aria-label={view === "tickets" ? "Open knowledge base" : "Open tickets"}><Icon name={view === "tickets" ? "book" : "inbox"} size={18}/></button>
+      {view === "tickets" && <button className="button-primary button-compact" onClick={() => setShowNew(true)}><Icon name="plus" size={16}/>New ticket</button>}
     </div></nav>
 
-    <main className="dashboard" id="inbox">
+    {view === "knowledge" ? <Knowledge orgId={orgId} role={membership?.role ?? "requester"}/> : <main className="dashboard" id="inbox">
       <section className="dashboard-intro"><div><p className="overline">SUPPORT INBOX</p><h1>Every conversation,<br/> in one place.</h1><p className="intro-copy">Listen, respond, and resolve with the full customer story in view.</p></div><div className="intro-stat" aria-label={`${tickets.length} tickets in this view`}><strong>{tickets.length}</strong><span>in this view</span></div></section>
       <section className="inbox-toolbar" aria-label="Ticket controls">
         <div className="segmented-control">{[{ label: "All", value: "" }, { label: "Open", value: "open" }, { label: "Waiting", value: "waiting" }, { label: "Closed", value: "closed" }].map((item) => <button key={item.label} className={activeStatus === item.value ? "active" : ""} onClick={() => filter(item.value)}>{item.label}</button>)}</div>
@@ -110,13 +86,13 @@ export function Desk() {
         <div className="ticket-list" aria-label="Ticket list"><div className="list-heading"><span>Conversation</span><span>Status</span></div>{tickets.length === 0 ? <EmptyTickets onCreate={() => setShowNew(true)}/> : tickets.map((ticket) => <button key={ticket.id} className={`ticket-row ${selected?.id === ticket.id ? "selected" : ""}`} onClick={() => void openTicket(ticket.id)}><span className={`priority-dot ${ticket.priority}`} aria-label={`${ticket.priority} priority`}/><span className="ticket-summary"><strong>{ticket.title}</strong><span>{ticket.description}</span><small>{ticket.requester_name}<i/> {relativeDate(ticket.created_at)}</small></span><span className={`status-label ${ticket.status}`}>{ticket.status.replace("_", " ")}</span></button>)}{nextCursor && <button className="load-more" disabled={loadingMore} onClick={() => void loadTickets(orgId, ticketQuery, nextCursor)}>{loadingMore ? "Loading…" : "Load more conversations"}</button>}</div>
         <div className="ticket-panel">{selected ? <TicketDetail ticket={selected} role={membership?.role ?? "requester"} orgId={orgId} onClose={() => setSelected(null)} onRefresh={() => openTicket(selected.id)} onUpdate={update}/> : <div className="empty-selection"><span className="empty-icon"><Icon name="inbox" size={30}/></span><h2>Select a conversation</h2><p>Choose a ticket to see its complete history and reply.</p></div>}</div>
       </section>
-    </main>
+    </main>}
     {showNew && <NewTicket orgId={orgId} onClose={() => setShowNew(false)} onCreated={(ticket) => { setShowNew(false); void loadTickets(orgId, ticketQuery); void openTicket(ticket.id); }}/>}
   </div>;
 }
 
-function GlobalNav({ user, onLogout }: { user: Session["user"]; onLogout: () => void }) {
-  return <header className="global-nav"><div className="global-nav-inner"><a className="global-brand" href="#inbox" aria-label="SupportDesk home"><Icon name="logo" size={22}/><span>SupportDesk</span></a><nav aria-label="Global"><a href="#inbox">Workspace</a><span aria-disabled="true">Knowledge</span><span aria-disabled="true">Settings</span></nav><div className="global-user"><span className="user-name">{user.displayName}</span><span className="user-avatar">{initials(user.displayName)}</span><button onClick={onLogout} title="Sign out" aria-label="Sign out"><Icon name="logout" size={17}/></button></div></div></header>;
+function GlobalNav({ user, view, onView, onLogout }: { user: Session["user"]; view: string; onView: (view: "tickets" | "knowledge") => void; onLogout: () => void }) {
+  return <header className="global-nav"><div className="global-nav-inner"><a className="global-brand" href="#inbox" onClick={() => onView("tickets")} aria-label="SupportDesk home"><Icon name="logo" size={22}/><span>SupportDesk</span></a><nav aria-label="Global"><a href="#inbox" onClick={() => onView("tickets")} aria-current={view === "tickets" ? "page" : undefined}>Workspace</a><a href="#knowledge" onClick={() => onView("knowledge")} aria-current={view === "knowledge" ? "page" : undefined}>Knowledge</a><span aria-disabled="true">Settings</span></nav><div className="global-user"><span className="user-name">{user.displayName}</span><span className="user-avatar">{initials(user.displayName)}</span><button onClick={onLogout} title="Sign out" aria-label="Sign out"><Icon name="logout" size={17}/></button></div></div></header>;
 }
 
 function Login({ onLogin }: { onLogin: (session: Session) => void }) {
