@@ -7,7 +7,7 @@ import { HeadObjectCommand, GetObjectCommand, S3Client } from "@aws-sdk/client-s
 import { createPresignedPost } from "@aws-sdk/s3-presigned-post";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { z, ZodError } from "zod";
-import { attachmentRequestSchema, createCommentSchema, createTicketSchema, loginSchema, updateTicketSchema, type Role } from "@supportdesk/contracts";
+import { attachmentRequestSchema, createArticleSchema, createCommentSchema, createTicketSchema, knowledgeImageRequestSchema, loginSchema, updateArticleSchema, updateTicketSchema, type Role } from "@supportdesk/contracts";
 import { createPool, transaction, type Database } from "@supportdesk/database";
 import { token, tokenHash, verifyPassword } from "./security.js";
 
@@ -72,6 +72,7 @@ export async function buildApp(deps: Dependencies = {}): Promise<FastifyInstance
     request.auth = { userId: membership.user_id, organizationId, role: membership.role };
   }
   const requireAgent = (request: FastifyRequest) => { if (request.auth.role === "requester") throw httpError(403, "Agent role required", "forbidden"); };
+  const requireAdmin = (request: FastifyRequest) => { if (request.auth.role !== "admin") throw httpError(403, "Admin role required", "forbidden"); };
 
   app.get("/health/live", async () => ({ status: "ok" }));
   app.get("/health/ready", async (_request, reply) => { try { await db.query("SELECT 1"); return { status: "ready" }; } catch { return reply.status(503).send({ status: "unavailable" }); } });
@@ -183,6 +184,60 @@ export async function buildApp(deps: Dependencies = {}): Promise<FastifyInstance
     const result = await db.query(`SELECT a.* FROM attachments a JOIN tickets t ON t.id=a.ticket_id AND t.organization_id=a.organization_id LEFT JOIN comments c ON c.id=a.comment_id AND c.organization_id=a.organization_id WHERE a.organization_id=$1 AND a.id=$2 AND a.state='available' ${auth.role === "requester" ? "AND t.requester_id=$3 AND (a.comment_id IS NULL OR c.visibility='public')" : ""}`, auth.role === "requester" ? [auth.organizationId, id, auth.userId] : [auth.organizationId, id]);
     const attachment = result.rows[0]; if (!attachment) throw httpError(404, "Attachment not found", "not_found");
     const url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: bucket, Key: attachment.object_key, ResponseContentDisposition: `attachment; filename*=UTF-8''${encodeURIComponent(attachment.file_name)}` }), { expiresIn: 300 }); return { url, expiresIn: 300 };
+  });
+
+  app.get("/v1/knowledge/articles", { preHandler: authenticate }, async (request) => {
+    const q = request.query as Record<string, string | undefined>; const limit = Math.min(Math.max(Number(q.limit) || 25, 1), MAX_PAGE); const cursor = parseCursor(q.cursor);
+    if (q.search && q.search.length > 200) throw httpError(400, "Search is too long", "validation_error");
+    const values: unknown[] = [request.auth.organizationId]; const conditions = ["k.organization_id=$1"];
+    if (q.search) { values.push(q.search); conditions.push(`to_tsvector('english',k.title||' '||k.body) @@ plainto_tsquery('english',$${values.length})`); }
+    if (cursor) { values.push(cursor.createdAt, cursor.id); conditions.push(`(k.updated_at,k.id)<($${values.length - 1},$${values.length})`); }
+    values.push(limit + 1);
+    const result = await db.query(`SELECT k.id,k.title,left(k.body,300) excerpt,k.updated_at,u.display_name updated_by_name FROM knowledge_articles k JOIN users u ON u.id=k.updated_by WHERE ${conditions.join(" AND ")} ORDER BY k.updated_at DESC,k.id DESC LIMIT $${values.length}`, values);
+    const hasMore = result.rows.length > limit; const items = result.rows.slice(0, limit); const last = items.at(-1);
+    return { items, nextCursor: hasMore ? makeCursor({ created_at: last.updated_at, id: last.id }) : null };
+  });
+  app.get("/v1/knowledge/articles/:id", { preHandler: authenticate }, async (request) => {
+    const id = idSchema.parse((request.params as { id: string }).id);
+    const result = await db.query("SELECT k.*,a.display_name author_name,u.display_name updated_by_name FROM knowledge_articles k JOIN users a ON a.id=k.author_id JOIN users u ON u.id=k.updated_by WHERE k.organization_id=$1 AND k.id=$2", [request.auth.organizationId, id]);
+    const article = result.rows[0]; if (!article) throw httpError(404, "Article not found", "not_found"); return article;
+  });
+  app.post("/v1/knowledge/articles", { preHandler: authenticate }, async (request, reply) => {
+    requireAdmin(request); const input = createArticleSchema.parse(request.body); const auth = request.auth;
+    const article = await transaction(db, async (client) => {
+      const result = await client.query("INSERT INTO knowledge_articles(organization_id,title,body,author_id,updated_by) VALUES($1,$2,$3,$4,$4) RETURNING *", [auth.organizationId, input.title, input.body, auth.userId]); const row = result.rows[0];
+      await client.query("INSERT INTO audit_events(organization_id,actor_id,action,entity_type,entity_id,data) VALUES($1,$2,'article.created','knowledge_article',$3,$4)", [auth.organizationId, auth.userId, row.id, JSON.stringify({ title: row.title })]); return row;
+    }); return reply.status(201).send(article);
+  });
+  app.patch("/v1/knowledge/articles/:id", { preHandler: authenticate }, async (request) => {
+    requireAdmin(request); const id = idSchema.parse((request.params as { id: string }).id); const input = updateArticleSchema.parse(request.body); const auth = request.auth;
+    return transaction(db, async (client) => {
+      const result = await client.query("UPDATE knowledge_articles SET title=$4,body=$5,updated_by=$6,version=version+1,updated_at=now() WHERE organization_id=$1 AND id=$2 AND version=$3 RETURNING *", [auth.organizationId, id, input.version, input.title, input.body, auth.userId]); const row = result.rows[0];
+      if (!row) { const exists = await client.query("SELECT 1 FROM knowledge_articles WHERE organization_id=$1 AND id=$2", [auth.organizationId, id]); throw httpError(exists.rowCount ? 409 : 404, exists.rowCount ? "Article was changed by another user" : "Article not found", exists.rowCount ? "version_conflict" : "not_found"); }
+      await client.query("INSERT INTO audit_events(organization_id,actor_id,action,entity_type,entity_id,data) VALUES($1,$2,'article.updated','knowledge_article',$3,$4)", [auth.organizationId, auth.userId, id, JSON.stringify({ title: row.title, version: row.version })]); return row;
+    });
+  });
+  app.post("/v1/knowledge/images", { preHandler: authenticate }, async (request, reply) => {
+    requireAdmin(request); const input = knowledgeImageRequestSchema.parse(request.body); const auth = request.auth;
+    const imageId = crypto.randomUUID(); const objectKey = `${auth.organizationId}/knowledge/${imageId}`;
+    await db.query("INSERT INTO knowledge_images(id,organization_id,uploader_id,object_key,file_name,content_type,size_bytes) VALUES($1,$2,$3,$4,$5,$6,$7)", [imageId, auth.organizationId, auth.userId, objectKey, input.fileName, input.contentType, input.sizeBytes]);
+    const upload = await createPresignedPost(s3, { Bucket: bucket, Key: objectKey, Expires: 600, Conditions: [["content-length-range", input.sizeBytes, input.sizeBytes], ["eq", "$Content-Type", input.contentType]], Fields: { "Content-Type": input.contentType } });
+    return reply.status(201).send({ imageId, upload });
+  });
+  app.post("/v1/knowledge/images/:id/complete", { preHandler: authenticate }, async (request) => {
+    requireAdmin(request); const id = idSchema.parse((request.params as { id: string }).id); const auth = request.auth;
+    const image = (await db.query("SELECT * FROM knowledge_images WHERE organization_id=$1 AND id=$2", [auth.organizationId, id])).rows[0]; if (!image) throw httpError(404, "Image not found", "not_found");
+    let head; try { head = await s3.send(new HeadObjectCommand({ Bucket: bucket, Key: image.object_key })); } catch { throw httpError(409, "Upload is not present", "upload_incomplete"); }
+    if (Number(head.ContentLength) !== Number(image.size_bytes) || head.ContentType !== image.content_type) throw httpError(409, "Uploaded object does not match allocation", "upload_mismatch");
+    await db.query("UPDATE knowledge_images SET state='available' WHERE organization_id=$1 AND id=$2", [auth.organizationId, id]); return { state: "available" };
+  });
+  // <img> tags cannot send the organization header, so access is checked against the image's own organization.
+  app.get("/v1/knowledge/images/:id", async (request, reply) => {
+    const id = idSchema.parse((request.params as { id: string }).id); const raw = request.cookies[SESSION_COOKIE]; if (!raw) throw httpError(401, "Not signed in", "unauthorized");
+    const result = await db.query("SELECT i.object_key,i.content_type FROM knowledge_images i JOIN memberships m ON m.organization_id=i.organization_id JOIN sessions s ON s.user_id=m.user_id WHERE i.id=$1 AND i.state='available' AND s.token_hash=$2 AND s.expires_at>now()", [id, tokenHash(raw)]);
+    const image = result.rows[0]; if (!image) throw httpError(404, "Image not found", "not_found");
+    const url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: bucket, Key: image.object_key, ResponseContentType: image.content_type }), { expiresIn: 300 });
+    return reply.header("cache-control", "private, max-age=240").header("cross-origin-resource-policy", "same-site").redirect(url, 302);
   });
   return app;
 }

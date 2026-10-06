@@ -26,6 +26,17 @@ export const attachmentRequestSchema = z.object({
   sizeBytes: z.number().int().positive().max(10 * 1024 * 1024),
   commentId: z.uuid().optional()
 });
-export type Role = (typeof roles)[number];
+export const knowledgeImageTypes = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
+export const createArticleSchema = z.object({
+  title: z.string().trim().min(3).max(200),
+  body: z.string().max(100_000)
+});
+export const updateArticleSchema = createArticleSchema.extend({ version: z.number().int().positive() });
+export const knowledgeImageRequestSchema = z.object({
+  fileName: z.string().trim().min(1).max(255),
+  contentType: z.enum(knowledgeImageTypes),
+  sizeBytes: z.number().int().positive().max(5 * 1024 * 1024)
+});
+export type Role =(typeof roles)[number];
 export type TicketStatus = (typeof statuses)[number];
 export type Priority = (typeof priorities)[number];
