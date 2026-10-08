@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { looksLikeMarkdown, markdownExcerpt, toEditorMarkdown, toStoredMarkdown } from "../app/knowledge-content.ts";
+import { isUploadedImage, looksLikeMarkdown, markdownExcerpt, toEditorMarkdown, toStoredMarkdown } from "../app/rich-content.ts";
 
 const id = "0f8b6a52-3c1d-4e2f-9a7b-1c2d3e4f5a6b";
 
@@ -27,4 +27,18 @@ test("detects pasted Markdown but not ordinary prose", () => {
 
 test("excerpts strip Markdown syntax", () => {
   assert.equal(markdownExcerpt(`## Reset\n\nOpen **Settings** and read [the guide](https://example.com).\n\n![x](kb-image:${id})`), "Reset Open Settings and read the guide.");
+});
+
+test("ticket image references round-trip alongside knowledge images", () => {
+  const stored = `![a](ticket-image:${id})\n\n![b](kb-image:${id})`;
+  const editor = toEditorMarkdown(stored, "/api");
+  assert.equal(editor, `![a](/api/v1/ticket-images/${id})\n\n![b](/api/v1/knowledge/images/${id})`);
+  assert.equal(toStoredMarkdown(editor, "/api"), stored);
+});
+
+test("only uploads served by this API count as uploaded images", () => {
+  assert.equal(isUploadedImage(`/api/v1/ticket-images/${id}`, "/api", "ticket-image"), true);
+  assert.equal(isUploadedImage(`/api/v1/knowledge/images/${id}`, "/api", "ticket-image"), false);
+  assert.equal(isUploadedImage("https://tracker.example/pixel.png", "/api", "ticket-image"), false);
+  assert.equal(isUploadedImage(`https://evil.example/api/v1/ticket-images/${id}`, "/api", "ticket-image"), false);
 });

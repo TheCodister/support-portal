@@ -7,8 +7,9 @@ import { HeadObjectCommand, GetObjectCommand, S3Client } from "@aws-sdk/client-s
 import { createPresignedPost } from "@aws-sdk/s3-presigned-post";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { z, ZodError } from "zod";
-import { attachmentRequestSchema, createArticleSchema, createCommentSchema, createTicketSchema, knowledgeImageRequestSchema, loginSchema, updateArticleSchema, updateTicketSchema, type Role } from "@supportdesk/contracts";
+import { attachmentRequestSchema, createArticleSchema, createCommentSchema, createTicketSchema, imageUploadSchema, loginSchema, updateArticleSchema, updateTicketSchema, type Role } from "@supportdesk/contracts";
 import { createPool, transaction, type Database } from "@supportdesk/database";
+import { ticketImageIds } from "./markdown.js";
 import { token, tokenHash, verifyPassword } from "./security.js";
 
 const SESSION_COOKIE = process.env.SESSION_COOKIE_NAME ?? "supportdesk_session";
@@ -124,8 +125,14 @@ export async function buildApp(deps: Dependencies = {}): Promise<FastifyInstance
   });
   app.post("/v1/tickets", { preHandler: authenticate }, async (request, reply) => {
     const input = createTicketSchema.parse(request.body); const auth = request.auth;
+    const imageIds = input.descriptionFormat === "markdown" ? ticketImageIds(input.description) : [];
+    if (!imageIds) throw httpError(400, "Ticket images must be uploaded with the editor", "invalid_image");
     const ticket = await transaction(db, async (client) => {
-      const result = await client.query("INSERT INTO tickets(organization_id,requester_id,title,description,priority) VALUES($1,$2,$3,$4,$5) RETURNING *", [auth.organizationId, auth.userId, input.title, input.description, input.priority]); const row = result.rows[0];
+      const result = await client.query("INSERT INTO tickets(organization_id,requester_id,title,description,priority,description_format) VALUES($1,$2,$3,$4,$5,$6) RETURNING *", [auth.organizationId, auth.userId, input.title, input.description, input.priority, input.descriptionFormat]); const row = result.rows[0];
+      if (imageIds.length) {
+        const linked = await client.query("UPDATE ticket_images SET ticket_id=$1 WHERE organization_id=$2 AND uploader_id=$3 AND id=ANY($4::uuid[]) AND ticket_id IS NULL AND state='available'", [row.id, auth.organizationId, auth.userId, imageIds]);
+        if (linked.rowCount !== imageIds.length) throw httpError(400, "An image in the description is missing or already used", "invalid_image");
+      }
       await client.query("INSERT INTO audit_events(organization_id,actor_id,action,entity_type,entity_id,data) VALUES($1,$2,'ticket.created','ticket',$3,$4)", [auth.organizationId, auth.userId, row.id, JSON.stringify({ title: row.title })]);
       await client.query("INSERT INTO outbox_events(organization_id,event_type,aggregate_id,payload) VALUES($1,'ticket.created',$2,$3)", [auth.organizationId, row.id, JSON.stringify({ ticketId: row.id, requesterId: auth.userId })]); return row;
     }); return reply.status(201).send(ticket);
@@ -186,6 +193,30 @@ export async function buildApp(deps: Dependencies = {}): Promise<FastifyInstance
     const url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: bucket, Key: attachment.object_key, ResponseContentDisposition: `attachment; filename*=UTF-8''${encodeURIComponent(attachment.file_name)}` }), { expiresIn: 300 }); return { url, expiresIn: 300 };
   });
 
+  app.post("/v1/ticket-images", { preHandler: authenticate }, async (request, reply) => {
+    const input = imageUploadSchema.parse(request.body); const auth = request.auth;
+    const imageId = crypto.randomUUID(); const objectKey = `${auth.organizationId}/ticket-images/${imageId}`;
+    await db.query("INSERT INTO ticket_images(id,organization_id,uploader_id,object_key,file_name,content_type,size_bytes) VALUES($1,$2,$3,$4,$5,$6,$7)", [imageId, auth.organizationId, auth.userId, objectKey, input.fileName, input.contentType, input.sizeBytes]);
+    const upload = await createPresignedPost(s3, { Bucket: bucket, Key: objectKey, Expires: 600, Conditions: [["content-length-range", input.sizeBytes, input.sizeBytes], ["eq", "$Content-Type", input.contentType]], Fields: { "Content-Type": input.contentType } });
+    return reply.status(201).send({ imageId, upload });
+  });
+  app.post("/v1/ticket-images/:id/complete", { preHandler: authenticate }, async (request) => {
+    const id = idSchema.parse((request.params as { id: string }).id); const auth = request.auth;
+    const image = (await db.query("SELECT * FROM ticket_images WHERE organization_id=$1 AND id=$2 AND uploader_id=$3", [auth.organizationId, id, auth.userId])).rows[0]; if (!image) throw httpError(404, "Image not found", "not_found");
+    let head; try { head = await s3.send(new HeadObjectCommand({ Bucket: bucket, Key: image.object_key })); } catch { throw httpError(409, "Upload is not present", "upload_incomplete"); }
+    if (Number(head.ContentLength) !== Number(image.size_bytes) || head.ContentType !== image.content_type) throw httpError(409, "Uploaded object does not match allocation", "upload_mismatch");
+    await db.query("UPDATE ticket_images SET state='available' WHERE organization_id=$1 AND id=$2", [auth.organizationId, id]); return { state: "available" };
+  });
+  // Like knowledge images, checked from the session alone. Before the ticket exists only the uploader may view it;
+  // afterwards anyone who can see the ticket may.
+  app.get("/v1/ticket-images/:id", async (request, reply) => {
+    const id = idSchema.parse((request.params as { id: string }).id); const raw = request.cookies[SESSION_COOKIE]; if (!raw) throw httpError(401, "Not signed in", "unauthorized");
+    const result = await db.query(`SELECT i.object_key,i.content_type FROM ticket_images i JOIN sessions s ON s.token_hash=$2 AND s.expires_at>now() JOIN memberships m ON m.organization_id=i.organization_id AND m.user_id=s.user_id LEFT JOIN tickets t ON t.organization_id=i.organization_id AND t.id=i.ticket_id WHERE i.id=$1 AND i.state='available' AND ((i.ticket_id IS NULL AND i.uploader_id=s.user_id) OR (t.id IS NOT NULL AND (m.role IN ('agent','admin') OR t.requester_id=s.user_id)))`, [id, tokenHash(raw)]);
+    const image = result.rows[0]; if (!image) throw httpError(404, "Image not found", "not_found");
+    const url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: bucket, Key: image.object_key, ResponseContentType: image.content_type }), { expiresIn: 300 });
+    return reply.header("cache-control", "private, max-age=240").header("cross-origin-resource-policy", "same-site").redirect(url, 302);
+  });
+
   app.get("/v1/knowledge/articles", { preHandler: authenticate }, async (request) => {
     const q = request.query as Record<string, string | undefined>; const limit = Math.min(Math.max(Number(q.limit) || 25, 1), MAX_PAGE); const cursor = parseCursor(q.cursor);
     if (q.search && q.search.length > 200) throw httpError(400, "Search is too long", "validation_error");
@@ -218,7 +249,7 @@ export async function buildApp(deps: Dependencies = {}): Promise<FastifyInstance
     });
   });
   app.post("/v1/knowledge/images", { preHandler: authenticate }, async (request, reply) => {
-    requireAdmin(request); const input = knowledgeImageRequestSchema.parse(request.body); const auth = request.auth;
+    requireAdmin(request); const input = imageUploadSchema.parse(request.body); const auth = request.auth;
     const imageId = crypto.randomUUID(); const objectKey = `${auth.organizationId}/knowledge/${imageId}`;
     await db.query("INSERT INTO knowledge_images(id,organization_id,uploader_id,object_key,file_name,content_type,size_bytes) VALUES($1,$2,$3,$4,$5,$6,$7)", [imageId, auth.organizationId, auth.userId, objectKey, input.fileName, input.contentType, input.sizeBytes]);
     const upload = await createPresignedPost(s3, { Bucket: bucket, Key: objectKey, Expires: 600, Conditions: [["content-length-range", input.sizeBytes, input.sizeBytes], ["eq", "$Content-Type", input.contentType]], Fields: { "Content-Type": input.contentType } });

@@ -3,12 +3,14 @@ import { z } from "zod";
 export const roles = ["requester", "agent", "admin"] as const;
 export const statuses = ["open", "in_progress", "waiting", "closed"] as const;
 export const priorities = ["low", "normal", "high", "urgent"] as const;
+export const descriptionFormats = ["text", "markdown"] as const;
 
 export const loginSchema = z.object({ email: z.email(), password: z.string().min(8).max(200) });
 export const createTicketSchema = z.object({
   title: z.string().trim().min(3).max(200),
   description: z.string().trim().min(1).max(20_000),
-  priority: z.enum(priorities).default("normal")
+  priority: z.enum(priorities).default("normal"),
+  descriptionFormat: z.enum(descriptionFormats).default("text")
 });
 export const updateTicketSchema = z.object({
   version: z.number().int().positive(),
@@ -26,15 +28,15 @@ export const attachmentRequestSchema = z.object({
   sizeBytes: z.number().int().positive().max(10 * 1024 * 1024),
   commentId: z.uuid().optional()
 });
-export const knowledgeImageTypes = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
+export const imageTypes = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
 export const createArticleSchema = z.object({
   title: z.string().trim().min(3).max(200),
   body: z.string().max(100_000)
 });
 export const updateArticleSchema = createArticleSchema.extend({ version: z.number().int().positive() });
-export const knowledgeImageRequestSchema = z.object({
+export const imageUploadSchema = z.object({
   fileName: z.string().trim().min(1).max(255),
-  contentType: z.enum(knowledgeImageTypes),
+  contentType: z.enum(imageTypes),
   sizeBytes: z.number().int().positive().max(5 * 1024 * 1024)
 });
 export type Role =(typeof roles)[number];
