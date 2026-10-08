@@ -2,22 +2,24 @@
 
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
-import { request } from "./api";
+import type { Editor } from "@tiptap/react";
+import { API, request } from "./api";
 import { Icon } from "./icons";
-import { markdownExcerpt } from "./rich-content";
+import { markdownExcerpt, toStoredMarkdown } from "./rich-content";
 
 type Membership = { organization_id: string; name: string; role: "requester" | "agent" | "admin" };
 type Session = { user: { id: string; email: string; displayName: string }; memberships: Membership[]; csrfToken: string };
 type Ticket = { id: string; title: string; description: string; description_format?: "text" | "markdown"; status: string; priority: string; version: number; requester_name: string; assignee_id?: string; assignee_name?: string; created_at: string; comments?: Comment[]; activity?: Activity[]; attachments?: Attachment[] };
-type Comment = { id: string; body: string; visibility: string; author_name: string; created_at: string };
+type Comment = { id: string; body: string; body_format?: "text" | "markdown"; visibility: string; author_name: string; created_at: string };
 type Activity = { id: string; action: string; actor_name?: string; created_at: string };
 type Attachment = { id: string; file_name: string; size_bytes: number };
 type Member = { id: string; display_name: string; role: string };
 
 const Knowledge = dynamic(() => import("./knowledge").then((module) => module.Knowledge), { ssr: false, loading: () => <main className="loading-screen"><span className="loader"/></main> });
 // The editor is loaded only when a ticket form or a formatted description is shown.
-const NewTicket = dynamic(() => import("./new-ticket").then((module) => module.NewTicket), { ssr: false });
-const TicketDescription = dynamic(() => import("./new-ticket").then((module) => module.TicketDescription), { ssr: false, loading: () => <p className="message-loading">Loading description…</p> });
+const NewTicket = dynamic(() => import("./ticket-editors").then((module) => module.NewTicket), { ssr: false });
+const CommentEditor = dynamic(() => import("./ticket-editors").then((module) => module.CommentEditor), { ssr: false, loading: () => <p className="message-loading composer-loading">Loading editor…</p> });
+const TicketRichText = dynamic(() => import("./ticket-editors").then((module) => module.TicketRichText), { ssr: false, loading: () => <p className="message-loading">Loading…</p> });
 
 export function Desk() {
   const [session, setSession] = useState<Session | null>();
@@ -110,15 +112,23 @@ function EmptyTickets({ onCreate }: { onCreate: () => void }) { return <div clas
 
 function TicketDetail({ ticket, role, orgId, onClose, onRefresh, onUpdate }: { ticket: Ticket; role: string; orgId: string; onClose: () => void; onRefresh: () => void; onUpdate: (fields: Record<string, unknown>) => void }) {
   const [internal, setInternal] = useState(false); const [error, setError] = useState(""); const [members, setMembers] = useState<Member[]>([]);
+  const [editor, setEditor] = useState<Editor | null>(null); const [uploading, setUploading] = useState(false); const [sending, setSending] = useState(false);
   useEffect(() => { if (role !== "requester") request<Member[]>("/v1/members", {}, orgId).then(setMembers).catch((caught) => setError((caught as Error).message)); }, [role, orgId]);
-  async function comment(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = event.currentTarget; const body = new FormData(form).get("body"); try { await request(`/v1/tickets/${ticket.id}/comments`, { method: "POST", body: JSON.stringify({ body, visibility: internal ? "internal" : "public" }) }, orgId); form.reset(); onRefresh(); } catch (caught) { setError((caught as Error).message); } }
+  async function comment(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); if (!editor) return;
+    if (editor.isEmpty) { setError(internal ? "Write a note before adding it." : "Write a reply before sending it."); editor.commands.focus(); return; }
+    setSending(true); setError("");
+    try { await request(`/v1/tickets/${ticket.id}/comments`, { method: "POST", body: JSON.stringify({ body: toStoredMarkdown(editor.getMarkdown(), API), bodyFormat: "markdown", visibility: internal ? "internal" : "public" }) }, orgId); editor.commands.clearContent(); onRefresh(); }
+    catch (caught) { setError((caught as Error).message); }
+    finally { setSending(false); }
+  }
   async function upload(file: File) { try { const allocation = await request<{ attachmentId: string; upload: { url: string; fields: Record<string, string> } }>(`/v1/tickets/${ticket.id}/attachments`, { method: "POST", body: JSON.stringify({ fileName: file.name, contentType: file.type || "application/octet-stream", sizeBytes: file.size }) }, orgId); const data = new FormData(); Object.entries(allocation.upload.fields).forEach(([key, value]) => data.append(key, value)); data.append("file", file); const uploaded = await fetch(allocation.upload.url, { method: "POST", body: data }); if (!uploaded.ok) throw new Error("Object upload failed"); await request(`/v1/attachments/${allocation.attachmentId}/complete`, { method: "POST" }, orgId); onRefresh(); } catch (caught) { setError((caught as Error).message); } }
   async function download(id: string) { try { const { url } = await request<{ url: string }>(`/v1/attachments/${id}/download`, {}, orgId); window.location.assign(url); } catch (caught) { setError((caught as Error).message); } }
   return <article className="ticket-detail"><header className="detail-header"><button className="mobile-back" onClick={onClose} aria-label="Back to tickets"><Icon name="back" size={20}/>Tickets</button><div className="detail-title"><p className="overline">TICKET {ticket.id.slice(0, 8).toUpperCase()}</p><h2>{ticket.title}</h2></div>{role !== "requester" && <select className="status-select" value={ticket.status} onChange={(event) => void onUpdate({ status: event.target.value })}><option value="open">Open</option><option value="in_progress">In progress</option><option value="waiting">Waiting</option><option value="closed">Closed</option></select>}</header>
     <section className="ticket-metadata" aria-label="Ticket metadata"><div><span>Priority</span><strong className={`priority-text ${ticket.priority}`}>{ticket.priority}</strong></div><div><span>Requester</span><strong>{ticket.requester_name}</strong></div><div><span>Assignee</span>{role === "requester" ? <strong>{ticket.assignee_name ?? "Unassigned"}</strong> : <select value={ticket.assignee_id ?? ""} onChange={(event) => void onUpdate({ assigneeId: event.target.value || null })}><option value="">Unassigned</option>{members.filter((member) => member.role !== "requester").map((member) => <option key={member.id} value={member.id}>{member.display_name}</option>)}</select>}</div></section>
-    <section className="conversation" aria-label="Conversation"><Message author={ticket.requester_name} date={ticket.created_at} body={ticket.description}>{ticket.description_format === "markdown" ? <TicketDescription markdown={ticket.description}/> : undefined}</Message>{ticket.comments?.map((item) => <Message key={item.id} author={item.author_name} date={item.created_at} body={item.body} internal={item.visibility === "internal"}/>)}</section>
+    <section className="conversation" aria-label="Conversation"><Message author={ticket.requester_name} date={ticket.created_at} body={ticket.description}>{ticket.description_format === "markdown" ? <TicketRichText markdown={ticket.description}/> : undefined}</Message>{ticket.comments?.map((item) => <Message key={item.id} author={item.author_name} date={item.created_at} body={item.body} internal={item.visibility === "internal"}>{item.body_format === "markdown" ? <TicketRichText markdown={item.body}/> : undefined}</Message>)}</section>
     {!!ticket.attachments?.length && <section className="attachment-list"><h3>Attachments</h3>{ticket.attachments.map((item) => <button key={item.id} onClick={() => void download(item.id)}><Icon name="download" size={16}/><span>{item.file_name}</span><small>{Math.ceil(item.size_bytes / 1024)} KB</small></button>)}</section>}
-    <form className={`composer ${internal ? "internal" : ""}`} onSubmit={comment}><div className="composer-tabs"><button type="button" className={!internal ? "active" : ""} onClick={() => setInternal(false)}>Reply</button>{role !== "requester" && <button type="button" className={internal ? "active" : ""} onClick={() => setInternal(true)}>Internal note</button>}</div><textarea name="body" rows={4} placeholder={internal ? "Write a private note for your team…" : "Write a reply…"} required/>{error && <p className="form-error composer-error">{error}</p>}<div className="composer-actions"><label className="attach-button"><Icon name="paperclip" size={16}/>Attach<input type="file" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file); }}/></label><button className="button-primary button-compact">{internal ? "Add note" : "Send reply"}</button></div></form>
+    <form className={`composer ${internal ? "internal" : ""}`} onSubmit={comment}><div className="composer-tabs"><button type="button" className={!internal ? "active" : ""} onClick={() => setInternal(false)}>Reply</button>{role !== "requester" && <button type="button" className={internal ? "active" : ""} onClick={() => setInternal(true)}>Internal note</button>}</div><CommentEditor orgId={orgId} internal={internal} onEditor={setEditor} onUploadingChange={setUploading} onError={setError}/>{error && <p className="form-error composer-error">{error}</p>}<div className="composer-actions"><label className="attach-button"><Icon name="paperclip" size={16}/>Attach<input type="file" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file); }}/></label><button className="button-primary button-compact" disabled={!editor || sending || uploading}>{sending ? "Sending…" : uploading ? "Uploading…" : internal ? "Add note" : "Send reply"}</button></div></form>
     {role !== "requester" && !!ticket.activity?.length && <details className="activity"><summary>Activity history <span>{ticket.activity.length}</span></summary>{ticket.activity.map((item) => <p key={item.id}><span><strong>{item.action.replace(".", " ")}</strong> by {item.actor_name ?? "System"}</span><time>{formatDate(item.created_at)}</time></p>)}</details>}
   </article>;
 }

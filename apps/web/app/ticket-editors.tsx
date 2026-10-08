@@ -7,10 +7,15 @@ import { Icon } from "./icons";
 import { isUploadedImage, toStoredMarkdown } from "./rich-content";
 import { RichTextBody, RichTextEditor, uploadImage } from "./rich-text-editor";
 
-// Ticket descriptions come from requesters, so only images uploaded through the editor are ever loaded.
+// Ticket descriptions and replies come from requesters, so only images uploaded through the editor are ever loaded.
 const ticketImagePolicy = (src: string) => isUploadedImage(src, API, "ticket-image");
 
-export function TicketDescription({ markdown }: { markdown: string }) { return <RichTextBody markdown={markdown} imagePolicy={ticketImagePolicy}/>; }
+export function TicketRichText({ markdown }: { markdown: string }) { return <RichTextBody markdown={markdown} imagePolicy={ticketImagePolicy}/>; }
+
+export function CommentEditor({ orgId, internal, onEditor, onUploadingChange, onError }: { orgId: string; internal: boolean; onEditor: (editor: Editor | null) => void; onUploadingChange: (uploading: boolean) => void; onError: (message: string) => void }) {
+  const upload = useCallback((file: File) => uploadImage(file, orgId, "/v1/ticket-images", "ticket-image"), [orgId]);
+  return <RichTextEditor compact initialMarkdown="" label={internal ? "Internal note" : "Reply"} upload={upload} imagePolicy={ticketImagePolicy} onEditor={onEditor} onUploadingChange={onUploadingChange} onError={onError}/>;
+}
 
 export function NewTicket({ orgId, onClose, onCreated }: { orgId: string; onClose: () => void; onCreated: (ticket: { id: string }) => void }) {
   const [error, setError] = useState("");

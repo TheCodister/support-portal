@@ -20,7 +20,8 @@ export const updateTicketSchema = z.object({
 }).refine((value) => Object.keys(value).some((key) => key !== "version"), "At least one field must change");
 export const createCommentSchema = z.object({
   body: z.string().trim().min(1).max(20_000),
-  visibility: z.enum(["public", "internal"]).default("public")
+  visibility: z.enum(["public", "internal"]).default("public"),
+  bodyFormat: z.enum(descriptionFormats).default("text")
 });
 export const attachmentRequestSchema = z.object({
   fileName: z.string().trim().min(1).max(255),

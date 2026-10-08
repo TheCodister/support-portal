@@ -162,9 +162,15 @@ export async function buildApp(deps: Dependencies = {}): Promise<FastifyInstance
   app.post("/v1/tickets/:id/comments", { preHandler: authenticate }, async (request, reply) => {
     const id = idSchema.parse((request.params as { id: string }).id); const input = createCommentSchema.parse(request.body); const auth = request.auth;
     if (input.visibility === "internal") requireAgent(request);
+    const imageIds = input.bodyFormat === "markdown" ? ticketImageIds(input.body) : [];
+    if (!imageIds) throw httpError(400, "Reply images must be uploaded with the editor", "invalid_image");
     const comment = await transaction(db, async (client) => {
       const ticket = await client.query("SELECT requester_id FROM tickets WHERE organization_id=$1 AND id=$2", [auth.organizationId, id]); if (!ticket.rows[0] || (auth.role === "requester" && ticket.rows[0].requester_id !== auth.userId)) throw httpError(404, "Ticket not found", "not_found");
-      const result = await client.query("INSERT INTO comments(organization_id,ticket_id,author_id,visibility,body) VALUES($1,$2,$3,$4,$5) RETURNING *", [auth.organizationId, id, auth.userId, input.visibility, input.body]); const row = result.rows[0];
+      const result = await client.query("INSERT INTO comments(organization_id,ticket_id,author_id,visibility,body,body_format) VALUES($1,$2,$3,$4,$5,$6) RETURNING *", [auth.organizationId, id, auth.userId, input.visibility, input.body, input.bodyFormat]); const row = result.rows[0];
+      if (imageIds.length) {
+        const linked = await client.query("UPDATE ticket_images SET ticket_id=$1,comment_id=$2 WHERE organization_id=$3 AND uploader_id=$4 AND id=ANY($5::uuid[]) AND ticket_id IS NULL AND state='available'", [id, row.id, auth.organizationId, auth.userId, imageIds]);
+        if (linked.rowCount !== imageIds.length) throw httpError(400, "An image in the reply is missing or already used", "invalid_image");
+      }
       await client.query("INSERT INTO audit_events(organization_id,actor_id,action,entity_type,entity_id,data) VALUES($1,$2,'comment.created','ticket',$3,$4)", [auth.organizationId, auth.userId, id, JSON.stringify({ commentId: row.id, visibility: input.visibility })]);
       await client.query("INSERT INTO outbox_events(organization_id,event_type,aggregate_id,payload) VALUES($1,'comment.created',$2,$3)", [auth.organizationId, id, JSON.stringify({ ticketId: id, commentId: row.id, visibility: input.visibility })]); return row;
     }); return reply.status(201).send(comment);
@@ -207,11 +213,11 @@ export async function buildApp(deps: Dependencies = {}): Promise<FastifyInstance
     if (Number(head.ContentLength) !== Number(image.size_bytes) || head.ContentType !== image.content_type) throw httpError(409, "Uploaded object does not match allocation", "upload_mismatch");
     await db.query("UPDATE ticket_images SET state='available' WHERE organization_id=$1 AND id=$2", [auth.organizationId, id]); return { state: "available" };
   });
-  // Like knowledge images, checked from the session alone. Before the ticket exists only the uploader may view it;
-  // afterwards anyone who can see the ticket may.
+  // Like knowledge images, checked from the session alone. Before its ticket or reply is saved only the uploader may
+  // view it; afterwards anyone who can see the ticket may, except that images in internal notes stay with agents and admins.
   app.get("/v1/ticket-images/:id", async (request, reply) => {
     const id = idSchema.parse((request.params as { id: string }).id); const raw = request.cookies[SESSION_COOKIE]; if (!raw) throw httpError(401, "Not signed in", "unauthorized");
-    const result = await db.query(`SELECT i.object_key,i.content_type FROM ticket_images i JOIN sessions s ON s.token_hash=$2 AND s.expires_at>now() JOIN memberships m ON m.organization_id=i.organization_id AND m.user_id=s.user_id LEFT JOIN tickets t ON t.organization_id=i.organization_id AND t.id=i.ticket_id WHERE i.id=$1 AND i.state='available' AND ((i.ticket_id IS NULL AND i.uploader_id=s.user_id) OR (t.id IS NOT NULL AND (m.role IN ('agent','admin') OR t.requester_id=s.user_id)))`, [id, tokenHash(raw)]);
+    const result = await db.query(`SELECT i.object_key,i.content_type FROM ticket_images i JOIN sessions s ON s.token_hash=$2 AND s.expires_at>now() JOIN memberships m ON m.organization_id=i.organization_id AND m.user_id=s.user_id LEFT JOIN tickets t ON t.organization_id=i.organization_id AND t.id=i.ticket_id LEFT JOIN comments c ON c.organization_id=i.organization_id AND c.id=i.comment_id WHERE i.id=$1 AND i.state='available' AND ((i.ticket_id IS NULL AND i.uploader_id=s.user_id) OR (t.id IS NOT NULL AND (m.role IN ('agent','admin') OR (t.requester_id=s.user_id AND (i.comment_id IS NULL OR c.visibility='public')))))`, [id, tokenHash(raw)]);
     const image = result.rows[0]; if (!image) throw httpError(404, "Image not found", "not_found");
     const url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: bucket, Key: image.object_key, ResponseContentType: image.content_type }), { expiresIn: 300 });
     return reply.header("cache-control", "private, max-age=240").header("cross-origin-resource-policy", "same-site").redirect(url, 302);
