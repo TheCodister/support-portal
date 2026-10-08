@@ -57,6 +57,62 @@ describe.runIf(process.env.RUN_INTEGRATION_TESTS === "true")("tenant and visibil
     const hidden = await app.inject({ method: "GET", url: `/v1/knowledge/articles/${id}`, headers: { cookie: globexCookie, "x-organization-id": globexOrg } });
     expect(hidden.statusCode).toBe(404);
   });
+  it("links ticket images to the new ticket and limits who can view them", async () => {
+    const requesterHeaders = { cookie: acmeCookie, "x-csrf-token": acmeCsrf, "x-organization-id": acmeOrg };
+    const db = (app as unknown as { db: { query: (sql: string, values: unknown[]) => Promise<unknown> } }).db;
+    async function uploadedImage() {
+      const allocated = await app.inject({ method: "POST", url: "/v1/ticket-images", headers: requesterHeaders, payload: { fileName: "screen.png", contentType: "image/png", sizeBytes: 1024 } });
+      expect(allocated.statusCode).toBe(201);
+      const { imageId } = allocated.json();
+      // Stands in for the browser's direct S3 upload and the HeadObject check in /complete.
+      await db.query("UPDATE ticket_images SET state='available' WHERE id=$1", [imageId]);
+      return imageId as string;
+    }
+    const imageId = await uploadedImage();
+    expect((await app.inject({ method: "GET", url: `/v1/ticket-images/${imageId}`, headers: { cookie: acmeCookie } })).statusCode).toBe(302);
+    const agent = await login("agent@acme.test");
+    expect((await app.inject({ method: "GET", url: `/v1/ticket-images/${imageId}`, headers: { cookie: agent.cookie } })).statusCode).toBe(404);
+
+    const external = await app.inject({ method: "POST", url: "/v1/tickets", headers: requesterHeaders, payload: { title: "Tracking pixel", description: "![x](https://tracker.example/p.png)", descriptionFormat: "markdown" } });
+    expect(external.statusCode).toBe(400);
+    const created = await app.inject({ method: "POST", url: "/v1/tickets", headers: requesterHeaders, payload: { title: "Printer screenshot", description: `# Printer\n\n![screen](ticket-image:${imageId})`, descriptionFormat: "markdown" } });
+    expect(created.statusCode).toBe(201);
+    expect(created.json().description_format).toBe("markdown");
+    expect((await app.inject({ method: "GET", url: `/v1/ticket-images/${imageId}`, headers: { cookie: agent.cookie } })).statusCode).toBe(302);
+    expect((await app.inject({ method: "GET", url: `/v1/ticket-images/${imageId}`, headers: { cookie: globexCookie } })).statusCode).toBe(404);
+    const reused = await app.inject({ method: "POST", url: "/v1/tickets", headers: requesterHeaders, payload: { title: "Reused image", description: `![screen](ticket-image:${imageId})`, descriptionFormat: "markdown" } });
+    expect(reused.statusCode).toBe(400);
+    const agentImage = await app.inject({ method: "POST", url: "/v1/tickets", headers: { cookie: agent.cookie, "x-csrf-token": agent.csrf, "x-organization-id": acmeOrg }, payload: { title: "Someone else's upload", description: `![screen](ticket-image:${await uploadedImage()})`, descriptionFormat: "markdown" } });
+    expect(agentImage.statusCode).toBe(400);
+    const plain = await app.inject({ method: "POST", url: "/v1/tickets", headers: requesterHeaders, payload: { title: "Plain text ticket", description: "Line one\nLine two" } });
+    expect(plain.json().description_format).toBe("text");
+  });
+  it("keeps images in internal notes away from the requester", async () => {
+    const requesterHeaders = { cookie: acmeCookie, "x-csrf-token": acmeCsrf, "x-organization-id": acmeOrg };
+    const agent = await login("agent@acme.test");
+    const agentHeaders = { cookie: agent.cookie, "x-csrf-token": agent.csrf, "x-organization-id": acmeOrg };
+    const db = (app as unknown as { db: { query: (sql: string, values: unknown[]) => Promise<unknown> } }).db;
+    async function uploadedImage(headers: Record<string, string>) {
+      const allocated = await app.inject({ method: "POST", url: "/v1/ticket-images", headers, payload: { fileName: "shot.png", contentType: "image/png", sizeBytes: 512 } });
+      const { imageId } = allocated.json();
+      await db.query("UPDATE ticket_images SET state='available' WHERE id=$1", [imageId]);
+      return imageId as string;
+    }
+    const ticket = (await app.inject({ method: "POST", url: "/v1/tickets", headers: requesterHeaders, payload: { title: "Reply images", description: "Body" } })).json();
+    const noteImage = await uploadedImage(agentHeaders);
+    const note = await app.inject({ method: "POST", url: `/v1/tickets/${ticket.id}/comments`, headers: agentHeaders, payload: { body: `Internal **note**\n\n![log](ticket-image:${noteImage})`, bodyFormat: "markdown", visibility: "internal" } });
+    expect(note.statusCode).toBe(201);
+    expect(note.json().body_format).toBe("markdown");
+    expect((await app.inject({ method: "GET", url: `/v1/ticket-images/${noteImage}`, headers: { cookie: agent.cookie } })).statusCode).toBe(302);
+    expect((await app.inject({ method: "GET", url: `/v1/ticket-images/${noteImage}`, headers: { cookie: acmeCookie } })).statusCode).toBe(404);
+    const replyImage = await uploadedImage(requesterHeaders);
+    const reply = await app.inject({ method: "POST", url: `/v1/tickets/${ticket.id}/comments`, headers: requesterHeaders, payload: { body: `![screen](ticket-image:${replyImage})`, bodyFormat: "markdown" } });
+    expect(reply.statusCode).toBe(201);
+    expect((await app.inject({ method: "GET", url: `/v1/ticket-images/${replyImage}`, headers: { cookie: agent.cookie } })).statusCode).toBe(302);
+    expect((await app.inject({ method: "GET", url: `/v1/ticket-images/${replyImage}`, headers: { cookie: acmeCookie } })).statusCode).toBe(302);
+    const external = await app.inject({ method: "POST", url: `/v1/tickets/${ticket.id}/comments`, headers: requesterHeaders, payload: { body: "![x](https://tracker.example/p.png)", bodyFormat: "markdown" } });
+    expect(external.statusCode).toBe(400);
+  });
   it("returns every matching ticket exactly once across cursor pages", async () => {
     const marker = `pagination${crypto.randomUUID().replaceAll("-", "")}`;
     const headers = { cookie: acmeCookie, "x-csrf-token": acmeCsrf, "x-organization-id": acmeOrg };

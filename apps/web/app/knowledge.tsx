@@ -4,7 +4,7 @@ import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { request } from "./api";
 import { ArticleBody, ArticleEditor, type Article } from "./article-editor";
 import { Icon } from "./icons";
-import { markdownExcerpt } from "./knowledge-content";
+import { markdownExcerpt } from "./rich-content";
 
 type ArticleSummary = { id: string; title: string; excerpt: string; updated_at: string; updated_by_name: string };
 type Mode = { kind: "list" } | { kind: "view"; article: Article } | { kind: "edit"; article?: Article };
