@@ -4,6 +4,7 @@ import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import type { Editor } from "@tiptap/react";
 import { API, request } from "./api";
+import { AnnouncementBanners } from "./announcement-banners";
 import { Icon } from "./icons";
 import { markdownExcerpt, toStoredMarkdown } from "./rich-content";
 
@@ -14,8 +15,11 @@ type Comment = { id: string; body: string; body_format?: "text" | "markdown"; vi
 type Activity = { id: string; action: string; actor_name?: string; created_at: string };
 type Attachment = { id: string; file_name: string; size_bytes: number };
 type Member = { id: string; display_name: string; role: string };
+type View = "tickets" | "knowledge" | "announcements";
+const views: { value: View; label: string; icon: "inbox" | "book" | "megaphone" }[] = [{ value: "tickets", label: "Tickets", icon: "inbox" }, { value: "knowledge", label: "Knowledge", icon: "book" }, { value: "announcements", label: "Announcements", icon: "megaphone" }];
 
 const Knowledge = dynamic(() => import("./knowledge").then((module) => module.Knowledge), { ssr: false, loading: () => <main className="loading-screen"><span className="loader"/></main> });
+const Announcements = dynamic(() => import("./announcements").then((module) => module.Announcements), { ssr: false, loading: () => <main className="loading-screen"><span className="loader"/></main> });
 // The editor is loaded only when a ticket form or a formatted description is shown.
 const NewTicket = dynamic(() => import("./ticket-editors").then((module) => module.NewTicket), { ssr: false });
 const CommentEditor = dynamic(() => import("./ticket-editors").then((module) => module.CommentEditor), { ssr: false, loading: () => <p className="message-loading composer-loading">Loading editor…</p> });
@@ -33,7 +37,8 @@ export function Desk() {
   const [ticketQuery, setTicketQuery] = useState("");
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [view, setView] = useState<"tickets" | "knowledge">("tickets");
+  const [view, setView] = useState<View>("tickets");
+  const [announcementsVersion, setAnnouncementsVersion] = useState(0);
   const listRequestId = useRef(0);
   const membership = session?.memberships.find((item) => item.organization_id === orgId);
 
@@ -72,16 +77,20 @@ export function Desk() {
   function filter(status: string) { const query = status ? `status=${status}` : ""; setActiveStatus(status); setSearchValue(""); setTicketQuery(query); setSelected(null); void loadTickets(orgId, query); }
   function search(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const value = searchValue.trim(); const query = value ? `search=${encodeURIComponent(value)}` : ""; setActiveStatus(""); setTicketQuery(query); setSelected(null); void loadTickets(orgId, query); }
 
+  // On narrow screens the workspace links collapse into one button that cycles through the views.
+  const nextView = views[(views.findIndex((item) => item.value === view) + 1) % views.length]!;
+
   return <div className="app-shell">
     <GlobalNav user={session.user} view={view} onView={setView} onLogout={() => void logout()}/>
     <nav className="workspace-nav" aria-label="Workspace navigation"><div className="nav-container">
       <div className="workspace-identity"><strong>SupportDesk</strong><span className="workspace-divider"/><label><span className="sr-only">Workspace</span><select value={orgId} onChange={(event) => { setOrgId(event.target.value); setSelected(null); setActiveStatus(""); setSearchValue(""); setTicketQuery(""); void loadTickets(event.target.value); }}>{session.memberships.map((item) => <option key={item.organization_id} value={item.organization_id}>{item.name}</option>)}</select></label></div>
-      <div className="workspace-links" aria-label="Primary"><button className={view === "tickets" ? "current" : ""} aria-current={view === "tickets" ? "page" : undefined} onClick={() => setView("tickets")}><Icon name="inbox" size={16}/>Tickets</button><button className={view === "knowledge" ? "current" : ""} aria-current={view === "knowledge" ? "page" : undefined} onClick={() => setView("knowledge")}><Icon name="book" size={16}/>Knowledge</button><button disabled><Icon name="people" size={16}/>Customers</button><button disabled><Icon name="chart" size={16}/>Reports</button></div>
-      <button className="view-switch" onClick={() => setView(view === "tickets" ? "knowledge" : "tickets")} aria-label={view === "tickets" ? "Open knowledge base" : "Open tickets"}><Icon name={view === "tickets" ? "book" : "inbox"} size={18}/></button>
+      <div className="workspace-links" aria-label="Primary">{views.map((item) => <button key={item.value} className={view === item.value ? "current" : ""} aria-current={view === item.value ? "page" : undefined} onClick={() => setView(item.value)}><Icon name={item.icon} size={16}/>{item.label}</button>)}<button disabled><Icon name="people" size={16}/>Customers</button><button disabled><Icon name="chart" size={16}/>Reports</button></div>
+      <button className="view-switch" onClick={() => setView(nextView.value)} aria-label={`Open ${nextView.label.toLowerCase()}`}><Icon name={nextView.icon} size={18}/></button>
       {view === "tickets" && <button className="button-primary button-compact" onClick={() => setShowNew(true)}><Icon name="plus" size={16}/>New ticket</button>}
     </div></nav>
 
-    {view === "knowledge" ? <Knowledge orgId={orgId} role={membership?.role ?? "requester"}/> : <main className="dashboard" id="inbox">
+    {orgId && <AnnouncementBanners orgId={orgId} refreshKey={announcementsVersion}/>}
+    {view === "announcements" ? <Announcements orgId={orgId} role={membership?.role ?? "requester"} onChanged={() => setAnnouncementsVersion((value) => value + 1)}/> : view === "knowledge" ? <Knowledge orgId={orgId} role={membership?.role ?? "requester"}/> : <main className="dashboard" id="inbox">
       <section className="dashboard-intro"><div><p className="overline">SUPPORT INBOX</p><h1>Every conversation,<br/> in one place.</h1><p className="intro-copy">Listen, respond, and resolve with the full customer story in view.</p></div><div className="intro-stat" aria-label={`${tickets.length} tickets in this view`}><strong>{tickets.length}</strong><span>in this view</span></div></section>
       <section className="inbox-toolbar" aria-label="Ticket controls">
         <div className="segmented-control">{[{ label: "All", value: "" }, { label: "Open", value: "open" }, { label: "Waiting", value: "waiting" }, { label: "Closed", value: "closed" }].map((item) => <button key={item.label} className={activeStatus === item.value ? "active" : ""} onClick={() => filter(item.value)}>{item.label}</button>)}</div>
@@ -97,8 +106,8 @@ export function Desk() {
   </div>;
 }
 
-function GlobalNav({ user, view, onView, onLogout }: { user: Session["user"]; view: string; onView: (view: "tickets" | "knowledge") => void; onLogout: () => void }) {
-  return <header className="global-nav"><div className="global-nav-inner"><a className="global-brand" href="#inbox" onClick={() => onView("tickets")} aria-label="SupportDesk home"><Icon name="logo" size={22}/><span>SupportDesk</span></a><nav aria-label="Global"><a href="#inbox" onClick={() => onView("tickets")} aria-current={view === "tickets" ? "page" : undefined}>Workspace</a><a href="#knowledge" onClick={() => onView("knowledge")} aria-current={view === "knowledge" ? "page" : undefined}>Knowledge</a><span aria-disabled="true">Settings</span></nav><div className="global-user"><span className="user-name">{user.displayName}</span><span className="user-avatar">{initials(user.displayName)}</span><button onClick={onLogout} title="Sign out" aria-label="Sign out"><Icon name="logout" size={17}/></button></div></div></header>;
+function GlobalNav({ user, view, onView, onLogout }: { user: Session["user"]; view: string; onView: (view: View) => void; onLogout: () => void }) {
+  return <header className="global-nav"><div className="global-nav-inner"><a className="global-brand" href="#inbox" onClick={() => onView("tickets")} aria-label="SupportDesk home"><Icon name="logo" size={22}/><span>SupportDesk</span></a><nav aria-label="Global"><a href="#inbox" onClick={() => onView("tickets")} aria-current={view === "tickets" ? "page" : undefined}>Workspace</a><a href="#knowledge" onClick={() => onView("knowledge")} aria-current={view === "knowledge" ? "page" : undefined}>Knowledge</a><a href="#announcements" onClick={() => onView("announcements")} aria-current={view === "announcements" ? "page" : undefined}>Announcements</a><span aria-disabled="true">Settings</span></nav><div className="global-user"><span className="user-name">{user.displayName}</span><span className="user-avatar">{initials(user.displayName)}</span><button onClick={onLogout} title="Sign out" aria-label="Sign out"><Icon name="logout" size={17}/></button></div></div></header>;
 }
 
 function Login({ onLogin }: { onLogin: (session: Session) => void }) {

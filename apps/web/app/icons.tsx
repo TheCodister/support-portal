@@ -1,4 +1,4 @@
-export type IconName = "logo" | "search" | "plus" | "inbox" | "people" | "chart" | "logout" | "paperclip" | "download" | "back" | "close" | "book" | "edit" | "image" | "link" | "markdown" | "bold" | "italic" | "list" | "numbered";
+export type IconName = "logo" | "search" | "plus" | "inbox" | "people" | "chart" | "logout" | "paperclip" | "download" | "back" | "close" | "book" | "edit" | "image" | "link" | "markdown" | "bold" | "italic" | "list" | "numbered" | "megaphone" | "sparkle" | "wrench" | "alert" | "trash";
 
 export function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
   const common = { width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round" as const, strokeLinejoin: "round" as const, "aria-hidden": true };
@@ -22,7 +22,12 @@ export function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
     bold: <path d="M7 5h6a3.5 3.5 0 0 1 0 7H7zM7 12h7a3.5 3.5 0 0 1 0 7H7z"/>,
     italic: <path d="M14 5h-4M14 19h-4M14 5l-4 14"/>,
     list: <><path d="M9 7h11M9 12h11M9 17h11"/><circle cx="5" cy="7" r=".6"/><circle cx="5" cy="12" r=".6"/><circle cx="5" cy="17" r=".6"/></>,
-    numbered: <><path d="M10 7h10M10 12h10M10 17h10M4 6l1.5-1V9M4 14.5a1.3 1.3 0 0 1 2.4.6c0 1-2.4 1.9-2.4 2.9h2.6"/></>
+    numbered: <><path d="M10 7h10M10 12h10M10 17h10M4 6l1.5-1V9M4 14.5a1.3 1.3 0 0 1 2.4.6c0 1-2.4 1.9-2.4 2.9h2.6"/></>,
+    megaphone: <><path d="M4 10v4h3l8 4V6L7 10z"/><path d="M7 14l1.5 5h2.5L10 15M18 9.5a3 3 0 0 1 0 5"/></>,
+    sparkle: <><path d="M12 4l1.8 4.7L18.5 10.5l-4.7 1.8L12 17l-1.8-4.7L5.5 10.5l4.7-1.8z"/><path d="M18.5 16v4M16.5 18h4"/></>,
+    wrench: <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>,
+    alert: <><path d="M12 4 3 19.5h18z"/><path d="M12 10v4.5M12 17.2v.1"/></>,
+    trash: <><path d="M5 7h14M10 7V5h4v2M7 7l1 12.5h8L17 7"/><path d="M10.5 11v5M13.5 11v5"/></>
   };
   return <svg {...common}>{paths[name]}</svg>;
 }
