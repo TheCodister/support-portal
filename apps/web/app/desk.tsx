@@ -5,6 +5,7 @@ import dynamic from "next/dynamic";
 import type { Editor } from "@tiptap/react";
 import { API, request } from "./api";
 import { AnnouncementBanners } from "./announcement-banners";
+import { HomeNotice } from "./home-notice";
 import { Icon } from "./icons";
 import { markdownExcerpt, toStoredMarkdown } from "./rich-content";
 
@@ -91,6 +92,7 @@ export function Desk() {
 
     {orgId && <AnnouncementBanners orgId={orgId} refreshKey={announcementsVersion}/>}
     {view === "announcements" ? <Announcements orgId={orgId} role={membership?.role ?? "requester"} onChanged={() => setAnnouncementsVersion((value) => value + 1)}/> : view === "knowledge" ? <Knowledge orgId={orgId} role={membership?.role ?? "requester"}/> : <main className="dashboard" id="inbox">
+      <HomeNotice orgId={orgId} role={membership?.role ?? "requester"}/>
       <section className="dashboard-intro"><div><p className="overline">SUPPORT INBOX</p><h1>Every conversation,<br/> in one place.</h1><p className="intro-copy">Listen, respond, and resolve with the full customer story in view.</p></div><div className="intro-stat" aria-label={`${tickets.length} tickets in this view`}><strong>{tickets.length}</strong><span>in this view</span></div></section>
       <section className="inbox-toolbar" aria-label="Ticket controls">
         <div className="segmented-control">{[{ label: "All", value: "" }, { label: "Open", value: "open" }, { label: "Waiting", value: "waiting" }, { label: "Closed", value: "closed" }].map((item) => <button key={item.label} className={activeStatus === item.value ? "active" : ""} onClick={() => filter(item.value)}>{item.label}</button>)}</div>

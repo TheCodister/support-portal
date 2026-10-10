@@ -78,6 +78,26 @@ describe.runIf(process.env.RUN_INTEGRATION_TESTS === "true")("tenant and visibil
     expect((await app.inject({ method: "DELETE", url: `/v1/announcements/${id}`, headers: { cookie: globexCookie, "x-csrf-token": globexCsrf, "x-organization-id": globexOrg } })).statusCode).toBe(404);
     expect((await app.inject({ method: "DELETE", url: `/v1/announcements/${id}`, headers: adminHeaders })).statusCode).toBe(204);
   });
+  it("keeps one homepage notice per organization that only admins can set or clear", async () => {
+    const requesterHeaders = { cookie: acmeCookie, "x-csrf-token": acmeCsrf, "x-organization-id": acmeOrg };
+    const admin = await login("admin@acme.test");
+    const adminHeaders = { cookie: admin.cookie, "x-csrf-token": admin.csrf, "x-organization-id": acmeOrg };
+    const read = async (headers: Record<string, string>) => (await app.inject({ method: "GET", url: "/v1/notice", headers })).json().notice;
+    await app.inject({ method: "DELETE", url: "/v1/notice", headers: adminHeaders });
+    expect(await read(requesterHeaders)).toBeNull();
+    expect((await app.inject({ method: "PUT", url: "/v1/notice", headers: requesterHeaders, payload: { kind: "incident", message: "Not allowed" } })).statusCode).toBe(403);
+    const created = await app.inject({ method: "PUT", url: "/v1/notice", headers: adminHeaders, payload: { kind: "incident", message: "Sign-in is failing" } });
+    expect(created.statusCode).toBe(200);
+    expect((await app.inject({ method: "PUT", url: "/v1/notice", headers: adminHeaders, payload: { kind: "maintenance", message: "Second notice" } })).statusCode).toBe(409);
+    const updated = await app.inject({ method: "PUT", url: "/v1/notice", headers: adminHeaders, payload: { kind: "released", message: "Fixed and released", version: created.json().version } });
+    expect(updated.statusCode).toBe(200);
+    expect((await app.inject({ method: "PUT", url: "/v1/notice", headers: adminHeaders, payload: { kind: "incident", message: "Stale", version: created.json().version } })).statusCode).toBe(409);
+    expect(await read(requesterHeaders)).toMatchObject({ kind: "released", message: "Fixed and released", updated_by_name: "Acme Admin" });
+    expect(await read({ cookie: globexCookie, "x-organization-id": globexOrg })).toBeNull();
+    expect((await app.inject({ method: "DELETE", url: "/v1/notice", headers: requesterHeaders })).statusCode).toBe(403);
+    expect((await app.inject({ method: "DELETE", url: "/v1/notice", headers: adminHeaders })).statusCode).toBe(204);
+    expect(await read(requesterHeaders)).toBeNull();
+  });
   it("links ticket images to the new ticket and limits who can view them", async () => {
     const requesterHeaders = { cookie: acmeCookie, "x-csrf-token": acmeCsrf, "x-organization-id": acmeOrg };
     const db = (app as unknown as { db: { query: (sql: string, values: unknown[]) => Promise<unknown> } }).db;

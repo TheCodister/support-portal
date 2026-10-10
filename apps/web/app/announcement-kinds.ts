@@ -27,3 +27,12 @@ export function toLocalInput(iso: string | null) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 export function fromLocalInput(value: string) { return value ? new Date(value).toISOString() : null; }
+
+// The pinned inbox notice uses the same tones, with "released" in green where announcements say "news".
+export type NoticeKind = "released" | "maintenance" | "incident";
+export type Notice = { kind: NoticeKind; message: string; version: number; updated_at: string; updated_by_name?: string };
+export const noticeKindMeta: Record<NoticeKind, { label: string; icon: IconName }> = {
+  released: { label: "Released", icon: "sparkle" },
+  maintenance: { label: "Maintenance", icon: "wrench" },
+  incident: { label: "Incident", icon: "alert" }
+};
