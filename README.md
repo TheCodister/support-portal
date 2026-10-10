@@ -59,6 +59,9 @@ Seeded demo tenants: **Acme** (admin, agent, requester) and **Globex** (admin). 
 
 ## Tech stack
 
+<details>
+<summary>Libraries and services by layer</summary>
+
 | Layer | Technology |
 |---|---|
 | Monorepo | pnpm 10 workspaces, TypeScript 5.9 (strict, `noUncheckedIndexedAccess`), Node 24 |
@@ -74,9 +77,14 @@ Seeded demo tenants: **Acme** (admin, agent, requester) and **Globex** (admin). 
 | CI/CD | GitHub Actions with OIDC federation to AWS |
 | Testing | Vitest (API), `node:test` (web), k6 (load) |
 
+</details>
+
 ---
 
 ## Repository layout
+
+<details>
+<summary>Directory tree and workspace dependencies</summary>
 
 ```text
 .
@@ -132,11 +140,16 @@ graph LR
   infra["@supportdesk/infra"]
 ```
 
+</details>
+
 ---
 
 ## Architecture
 
 ### Logical architecture
+
+<details>
+<summary>Diagram: browser, API modules, PostgreSQL, S3 and the outbox</summary>
 
 One stateless API owns every business rule. The browser talks only to the API (JSON) and to S3 (file bytes, through presigned URLs). PostgreSQL is authoritative. The outbox makes side effects durable without a distributed transaction.
 
@@ -185,7 +198,12 @@ Design principles enforced in code:
 - **Optimistic concurrency.** Ticket and article updates require the current `version`. A stale write gets `409 version_conflict`.
 - **Keyset pagination.** Cursors encode `(created_at, id)` (or `updated_at` for articles) and are backed by matching composite indexes.
 
+</details>
+
 ### AWS deployment architecture
+
+<details>
+<summary>Diagram and resource list</summary>
 
 The learning environment has no custom domain. It reaches the API through **Amplify on the same origin** (`/api/*`), which forwards to an **API Gateway HTTP API**, then a **VPC Link**, then an **internal ALB** in front of the Fargate API. When a `certificateArn` is supplied, the stack instead makes the ALB internet-facing with HTTPS and drops API Gateway.
 
@@ -258,7 +276,12 @@ flowchart TB
 | Demo password secret and maintenance (seed) task | created | not created |
 | Rolling deploy | `minHealthyPercent` 0 (brief restart downtime) | 50 % |
 
+</details>
+
 ### Network and security groups
+
+<details>
+<summary>Security groups and allowed ports</summary>
 
 ```mermaid
 flowchart LR
@@ -278,7 +301,12 @@ flowchart LR
 - RDS lives in **private isolated subnets**, accepts only the API security group on 5432, requires TLS, and the API verifies the server certificate against the bundled RDS CA (`NODE_EXTRA_CA_CERTS`, `rejectUnauthorized: true`).
 - The S3 bucket blocks all public access, enforces TLS, and allows CORS only from `webOrigin`.
 
+</details>
+
 ### Request lifecycle
+
+<details>
+<summary>Sequence diagram of an authenticated request</summary>
 
 Every authenticated request carries the session cookie, the `x-organization-id` header, and, for mutations, `x-csrf-token`.
 
@@ -310,7 +338,12 @@ sequenceDiagram
 
 Errors always have the shape `{ error, message, requestId }`. Zod failures map to `400 validation_error`. Status 5xx is logged with the error and returned as a generic `Internal server error`. `x-request-id` is honoured as the request ID.
 
+</details>
+
 ### File uploads (attachments and images)
+
+<details>
+<summary>Allocate, upload, complete protocol and object keys</summary>
 
 Attachments, ticket images and knowledge images all follow the same **allocate → upload → complete** protocol.
 
@@ -345,7 +378,12 @@ sequenceDiagram
 
 Incomplete multipart uploads are aborted by an S3 lifecycle rule after one day.
 
+</details>
+
 ### Rich text and embedded images
+
+<details>
+<summary>How Markdown and image references are stored</summary>
 
 Markdown is stored with **origin-independent image references**, so the stored text does not depend on where the API is hosted:
 
@@ -360,7 +398,12 @@ Markdown is stored with **origin-independent image references**, so the stored t
 - `GET /v1/ticket-images/:id` and `GET /v1/knowledge/images/:id` are reached from `<img>` tags, which cannot send the organization header. They authorize from the **session alone**, checked against the image's own organization, then `302` redirect to a 5-minute presigned URL (`cache-control: private, max-age=240`).
 - Visibility rules for ticket images: before it is saved, only the uploader can see an image. Afterwards, agents and admins can see it, and so can the ticket's requester unless the image belongs to an internal note.
 
+</details>
+
 ### Outbox and background jobs
+
+<details>
+<summary>Outbox, SQS and idempotent consumer flow</summary>
 
 ```mermaid
 sequenceDiagram
@@ -400,9 +443,14 @@ sequenceDiagram
 - `WORKER_MODE` is `publisher`, `consumer`, or `all` (the default, handy locally). Each worker drains in-flight work on `SIGTERM`/`SIGINT`.
 - In AWS both worker services exist, but their **desired count is 0** until you deploy with `-c enableWorkers=true` (stage 2).
 
+</details>
+
 ---
 
 ## Multi-tenancy, authentication and authorization
+
+<details>
+<summary>Sessions, CSRF, tenant scoping and the role matrix</summary>
 
 **Sessions.** `POST /v1/auth/login` verifies a scrypt hash (`salt:hex`, constant-time compare), creates a 32-byte random session token, and stores **only its SHA-256 hash** in `sessions` (7-day expiry). Two cookies are set, both `HttpOnly`, `SameSite=Lax`, `Secure` in production, with an optional `COOKIE_DOMAIN`:
 
@@ -437,9 +485,14 @@ Requesters get `404` (not `403`) for tickets they do not own, so the API does no
 
 **Hardening:** Helmet headers, a global rate limit (`RATE_LIMIT_MAX`, default 300 per minute), a 200-character search cap, a page size of at most 100, UUID validation on every ID, length limits through Zod, and non-root containers (`USER node`).
 
+</details>
+
 ---
 
 ## Data model
+
+<details>
+<summary>ER diagram, migrations and indexes</summary>
 
 Migrations live in `packages/database/migrations` and run in filename order. Each runs in its own transaction and is recorded in `schema_migrations`.
 
@@ -599,9 +652,14 @@ Key indexes:
 - `comments (organization_id, ticket_id, created_at, id)`, `audit_events (organization_id, entity_type, entity_id, created_at DESC)`.
 - Partial index `outbox_events (available_at, created_at) WHERE published_at IS NULL` keeps publisher polling cheap.
 
+</details>
+
 ---
 
 ## API reference
+
+<details>
+<summary>Every endpoint with auth, role and payload</summary>
 
 Base path `/v1` (behind `/api` on Amplify). 🔒 means a session plus `x-organization-id` are required. Mutations also need `x-csrf-token`.
 
@@ -642,6 +700,8 @@ Base path `/v1` (behind `/api` on Amplify). 🔒 means a session plus `x-organiz
 
 Request schemas are defined once in [`packages/contracts/src/index.ts`](packages/contracts/src/index.ts).
 
+</details>
+
 ---
 
 ## Local development
@@ -672,6 +732,9 @@ To run the worker locally, start a queue (for example `awslocal sqs create-queue
 
 ### Root scripts
 
+<details>
+<summary>What each root pnpm script does</summary>
+
 | Script | Does |
 |---|---|
 | `pnpm dev` | API + web in parallel, loading `.env` |
@@ -682,9 +745,14 @@ To run the worker locally, start a queue (for example `awslocal sqs create-queue
 | `pnpm db:migrate` / `pnpm db:seed` | Apply migrations / upsert demo tenants and users |
 | `pnpm infra <cmd>` | Runs a script in `infra` (`synth`, `diff`, `deploy`, `destroy`) |
 
+</details>
+
 ---
 
 ## Configuration
+
+<details>
+<summary>Every environment variable</summary>
 
 | Variable | Used by | Default / example | Notes |
 |---|---|---|---|
@@ -707,9 +775,14 @@ To run the worker locally, start a queue (for example `awslocal sqs create-queue
 | `WORKER_MODE` | worker | `all` | `publisher` \| `consumer` \| `all` |
 | `SEED_PASSWORD` | seed | `supportdesk-demo` outside production | Required in production. The maintenance task reads it from Secrets Manager |
 
+</details>
+
 ---
 
 ## Testing
+
+<details>
+<summary>Test suites and how to run them</summary>
 
 | Suite | Location | Runner | Covers |
 |---|---|---|---|
@@ -735,6 +808,8 @@ k6 run -e API_URL=http://localhost:4000 -e RATE=7 -e DURATION=5m load-tests/base
 
 Never point synthetic load at a shared or production environment without approval.
 
+</details>
+
 ---
 
 ## CI/CD
@@ -747,6 +822,9 @@ Two workflows in `.github/workflows`:
 | `deploy.yml` | push to `main`, `workflow_dispatch` | `verify` → `preflight` → `api` → `web` → `smoke` |
 
 ### Pipeline
+
+<details>
+<summary>Pipeline diagram</summary>
 
 ```mermaid
 flowchart LR
@@ -771,7 +849,12 @@ flowchart LR
   web --> smoke["smoke<br/>GET WEB_ORIGIN/<br/>GET WEB_ORIGIN/api/health/ready"]
 ```
 
+</details>
+
 ### Deploy sequence in detail
+
+<details>
+<summary>What each deploy job does</summary>
 
 ```mermaid
 sequenceDiagram
@@ -812,7 +895,12 @@ sequenceDiagram
 - **Self-aware of demo expiry.** Once the scheduled expiry deletes the stack or the Amplify app, `preflight` skips the deploy instead of recreating paid resources.
 - **Least privilege.** Every job has `contents: read`. Only AWS-facing jobs request `id-token: write`.
 
+</details>
+
 ### Authentication: GitHub OIDC → AWS
+
+<details>
+<summary>How CI gets short-lived AWS credentials</summary>
 
 `SupportDeskGitHubDeploy` (a separate stack, so the demo expiry never deletes it) creates:
 
@@ -820,7 +908,12 @@ sequenceDiagram
 - `DeployRole`, trusted **only** for `sub = <immutable subject prefix>:ref:refs/heads/main`, with a maximum session of 1 hour. The repository uses GitHub's **immutable subject** format `repo:<owner>@<ownerId>/<repo>@<repoId>`, so renaming or transferring the repo cannot hijack the trust. If the repo moves, read the new prefix with `gh api repos/<owner>/<repo>/actions/oidc/customization/sub` and redeploy with `-c githubSubjectPrefix=…`.
 - Scoped permissions: assume the CDK bootstrap roles (`cdk-hnb659fds-*`), describe the `SupportDesk` stack, push to `supportdesk-*` ECR repositories, register task definitions, run **only** `SupportDeskMigrateTask*`, pass **only** the migrate task roles to `ecs-tasks.amazonaws.com`, and run Amplify deployments for the one app.
 
+</details>
+
 ### Repository settings
+
+<details>
+<summary>Required GitHub variables and secrets</summary>
 
 | Kind | Name | Value |
 |---|---|---|
@@ -832,9 +925,14 @@ sequenceDiagram
 
 No AWS access keys are stored in GitHub.
 
+</details>
+
 ---
 
 ## Infrastructure (AWS CDK)
+
+<details>
+<summary>Stacks, resources and context flags</summary>
 
 `infra/bin/app.ts` defines three stacks:
 
@@ -871,7 +969,12 @@ No AWS access keys are stored in GitHub.
 | OutboxPublisherTask | 256 / 512 | worker, `WORKER_MODE=publisher` | `publisher` |
 | JobConsumerTask | 256 / 512 | worker, `WORKER_MODE=consumer` | `consumer` |
 
+</details>
+
 ### One-time bootstrap
+
+<details>
+<summary>Bootstrap commands</summary>
 
 An AWS admin runs this once from a workstation:
 
@@ -886,9 +989,14 @@ Then set the repository secret and variables listed above, and configure the Amp
 
 Images must be `linux/arm64`. CI builds them on a native ARM runner.
 
+</details>
+
 ---
 
 ## Release, rollback and migrations
+
+<details>
+<summary>Release and rollback per component</summary>
 
 **Migrations must be backward compatible (expand, then contract).** In CI the migration runs *before* the new API image rolls out, and the old frontend keeps serving until the `web` job finishes, so for a while old code runs against the new schema. Add columns with defaults and new tables first. Remove things only in a later release.
 
@@ -900,9 +1008,14 @@ Images must be `linux/arm64`. CI builds them on a native ARM runner.
 
 `workflow_dispatch` is only trusted on `main` (the OIDC role rejects other refs).
 
+</details>
+
 ---
 
 ## Observability and operations
+
+<details>
+<summary>Logs, health checks, alarms, backups and failure exercises</summary>
 
 - **Logs:** Fastify JSON logs with request IDs go to CloudWatch (`ApiLogs`, one-month retention, non-blocking driver). Workers log structured JSON to their own groups (one week).
 - **Health:** `/health/live` for the container health check, `/health/ready` (DB ping) for the ALB target group and the CI smoke test.
@@ -911,9 +1024,14 @@ Images must be `linux/arm64`. CI builds them on a native ARM runner.
 - **Failure exercises:** kill the API task, pause the publisher and drain the backlog, kill a consumer between commit and delete, deploy a failing readiness image. Results go in `docs/benchmarks/YYYY-MM-DD-<exercise>.md`.
 - **Demo seeding in AWS:** run the `MaintenanceTask` as a one-off ECS task. It upserts the demo users with the generated `DemoPassword` secret.
 
+</details>
+
 ---
 
 ## Capacity model and scaling roadmap
+
+<details>
+<summary>Traffic model and the stage-by-stage roadmap</summary>
 
 Assumptions: 60 API requests per daily active user, a peak of 10× the daily average, 80 % reads. File bytes go directly to S3 and are excluded.
 
@@ -928,6 +1046,8 @@ Assumptions: 60 API requests per daily active user, a peak of 10× the daily ave
 | 5 | 1,000,000 | 60,000,000 | 7,000 | Validate before claiming. Sharding, Kafka and microservices are *not* assumed |
 
 Initial service targets: read p95 < 300 ms, write p95 < 500 ms, unexpected errors < 0.5 %, queue age normally < 60 s, zero cross-tenant access. Each stage has explicit triggers and acceptance criteria in [`supportdesk-system-design-plan.md`](supportdesk-system-design-plan.md).
+
+</details>
 
 ---
 
