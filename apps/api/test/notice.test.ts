@@ -56,7 +56,7 @@ describe("homepage notice", () => {
   });
 
   it("lets an admin clear the notice", async () => {
-    expect((await app.inject({ method: "DELETE", url: "/v1/notice", headers })).statusCode).toBe(204);
+    expect((await app.inject({ method: "DELETE", url: "/v1/notice", headers, payload: {} })).statusCode).toBe(204);
     expect(query.mock.calls.some(([sql]) => sql.includes("'notice.cleared'"))).toBe(true);
     written = undefined;
     expect((await app.inject({ method: "DELETE", url: "/v1/notice", headers })).statusCode).toBe(404);

@@ -48,7 +48,8 @@ describe("announcement permissions", () => {
   });
 
   it("lets an admin delete an announcement and records an audit event", async () => {
-    const response = await app.inject({ method: "DELETE", url: `/v1/announcements/${announcement.id}`, headers });
+    // The web client sends "{}" with every bodyless mutation (see request-headers.ts).
+    const response = await app.inject({ method: "DELETE", url: `/v1/announcements/${announcement.id}`, headers, payload: {} });
     expect(response.statusCode).toBe(204);
     expect(query.mock.calls.some(([sql]) => sql.includes("'announcement.deleted'"))).toBe(true);
   });
