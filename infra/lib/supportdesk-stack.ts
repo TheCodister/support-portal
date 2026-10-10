@@ -13,6 +13,8 @@ import { Queue } from "aws-cdk-lib/aws-sqs";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
 import { Secret } from "aws-cdk-lib/aws-secretsmanager";
 import { Effect, PolicyStatement } from "aws-cdk-lib/aws-iam";
+import { Rule, Schedule } from "aws-cdk-lib/aws-events";
+import { EcsTask } from "aws-cdk-lib/aws-events-targets";
 import { Construct } from "constructs";
 
 export interface SupportDeskProps extends StackProps { stageName: string }
@@ -44,6 +46,11 @@ export class SupportDeskStack extends Stack {
     api.addPortMappings({ containerPort: 4000 }); attachments.grantReadWrite(task.taskRole); dbSecret.grantRead(task.taskRole);
     const migrateTask = new FargateTaskDefinition(this, "MigrateTask", { cpu: 256, memoryLimitMiB: 512, runtimePlatform: { operatingSystemFamily: OperatingSystemFamily.LINUX, cpuArchitecture: CpuArchitecture.ARM64 } });
     migrateTask.addContainer("Migrate", { image: ContainerImage.fromEcrRepository(repository, this.node.tryGetContext("imageTag") ?? "latest"), command: ["/app/packages/database/node_modules/.bin/tsx", "/app/packages/database/src/migrate.ts"], logging: LogDrivers.awsLogs({ logGroup: logs, streamPrefix: "migrate", mode: AwsLogDriverMode.NON_BLOCKING }), environment: { NODE_ENV: "production", DB_HOST: database.dbInstanceEndpointAddress, DB_PORT: database.dbInstanceEndpointPort, DB_NAME: "supportdesk", DB_SSL: "true" }, secrets: { DB_USER: EcsSecret.fromSecretsManager(dbSecret, "username"), DB_PASSWORD: EcsSecret.fromSecretsManager(dbSecret, "password") } });
+    // Daily: delete uploads still unused after CLEANUP_AFTER_DAYS (never-attached ticket and reply images, unreferenced article images, unfinished attachments).
+    const cleanupTask = new FargateTaskDefinition(this, "UploadCleanupTask", { cpu: 256, memoryLimitMiB: 512, runtimePlatform: { operatingSystemFamily: OperatingSystemFamily.LINUX, cpuArchitecture: CpuArchitecture.ARM64 } });
+    cleanupTask.addContainer("UploadCleanup", { image: ContainerImage.fromEcrRepository(repository, this.node.tryGetContext("imageTag") ?? "latest"), command: ["node", "apps/api/dist/cleanup-job.js"], logging: LogDrivers.awsLogs({ logGroup: logs, streamPrefix: "cleanup", mode: AwsLogDriverMode.NON_BLOCKING }), environment: { NODE_ENV: "production", AWS_REGION: this.region, ATTACHMENTS_BUCKET: attachments.bucketName, CLEANUP_AFTER_DAYS: String(this.node.tryGetContext("uploadCleanupDays") ?? 60), DB_HOST: database.dbInstanceEndpointAddress, DB_PORT: database.dbInstanceEndpointPort, DB_NAME: "supportdesk", DB_SSL: "true" }, secrets: { DB_USER: EcsSecret.fromSecretsManager(dbSecret, "username"), DB_PASSWORD: EcsSecret.fromSecretsManager(dbSecret, "password") } });
+    attachments.grantDelete(cleanupTask.taskRole);
+    new Rule(this, "UploadCleanupSchedule", { description: "Delete unused uploads daily", schedule: Schedule.cron({ minute: "30", hour: "3" }), targets: [new EcsTask({ cluster, taskDefinition: cleanupTask, subnetSelection: { subnetType: SubnetType.PUBLIC }, securityGroups: [apiSg], assignPublicIp: true })] });
     if (demoPassword) {
       const maintenanceTask = new FargateTaskDefinition(this, "MaintenanceTask", { cpu: 256, memoryLimitMiB: 512, runtimePlatform: { operatingSystemFamily: OperatingSystemFamily.LINUX, cpuArchitecture: CpuArchitecture.ARM64 } });
       maintenanceTask.addContainer("Maintenance", { image: ContainerImage.fromEcrRepository(repository, this.node.tryGetContext("imageTag") ?? "latest"), command: ["/app/packages/database/node_modules/.bin/tsx", "/app/packages/database/src/seed.ts"], logging: LogDrivers.awsLogs({ logGroup: logs, streamPrefix: "maintenance", mode: AwsLogDriverMode.NON_BLOCKING }), environment: { NODE_ENV: "production", DB_HOST: database.dbInstanceEndpointAddress, DB_PORT: database.dbInstanceEndpointPort, DB_NAME: "supportdesk", DB_SSL: "true" }, secrets: { DB_USER: EcsSecret.fromSecretsManager(dbSecret, "username"), DB_PASSWORD: EcsSecret.fromSecretsManager(dbSecret, "password"), SEED_PASSWORD: EcsSecret.fromSecretsManager(demoPassword) } });

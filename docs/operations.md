@@ -60,6 +60,16 @@ Then, in the repository settings:
 
 Roll back by reverting the commit on `main`, which redeploys the previous code, or locally with `cdk deploy SupportDesk -c imageTag=<previous sha>`. A manual run (`workflow_dispatch`) is only trusted on `main`.
 
+## Unused upload cleanup
+
+A scheduled ECS task (`UploadCleanupTask`, EventBridge rule `UploadCleanupSchedule`, daily at 03:30 UTC) runs `apps/api/dist/cleanup-job.js`. It deletes, from S3 and then from the database, uploads that nothing shows and that are older than `CLEANUP_AFTER_DAYS` (default 60, set with `-c uploadCleanupDays=<n>`):
+
+- ticket and reply images never attached to a saved ticket or reply (`ticket_images.ticket_id IS NULL`);
+- knowledge images no article body references (`kb-image:<id>`), including ones removed from an article by an edit;
+- ticket attachments whose upload never completed (`attachments.state <> 'available'`).
+
+Images and attachments that a ticket, reply or article still uses are never deleted. Rows are locked while a batch is deleted, so an upload attached at the same moment is either kept or rejected with "missing or already used". If S3 refuses a deletion, the batch rolls back and the next day's run retries it. Results are logged under the `cleanup` stream prefix of the API log group; run it on demand with `aws ecs run-task` on the `UploadCleanupTask` family.
+
 ## Backup restore rehearsal
 
 Create a manual RDS snapshot, restore it to a new isolated instance, run the API with an isolated configuration, and verify organization, ticket, comment, audit, and attachment metadata counts. Record snapshot time, latest recovered row timestamp, restore-ready time, validation time, estimated RPO, and observed RTO. Never repoint production during a rehearsal.
