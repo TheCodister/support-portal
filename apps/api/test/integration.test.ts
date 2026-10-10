@@ -78,11 +78,25 @@ describe.runIf(process.env.RUN_INTEGRATION_TESTS === "true")("tenant and visibil
     expect((await app.inject({ method: "DELETE", url: `/v1/announcements/${id}`, headers: { cookie: globexCookie, "x-csrf-token": globexCsrf, "x-organization-id": globexOrg } })).statusCode).toBe(404);
     expect((await app.inject({ method: "DELETE", url: `/v1/announcements/${id}`, headers: adminHeaders })).statusCode).toBe(204);
   });
+  it("counts tickets by status, only a requester's own for a requester", async () => {
+    const requesterHeaders = { cookie: acmeCookie, "x-csrf-token": acmeCsrf, "x-organization-id": acmeOrg };
+    const agent = await login("agent@acme.test");
+    const agentHeaders = { cookie: agent.cookie, "x-organization-id": acmeOrg };
+    const summary = async (headers: Record<string, string>) => (await app.inject({ method: "GET", url: "/v1/tickets/summary", headers })).json();
+    const before = await summary(requesterHeaders);
+    await app.inject({ method: "POST", url: "/v1/tickets", headers: requesterHeaders, payload: { title: "Summary count check", description: "Counts as open" } });
+    const after = await summary(requesterHeaders);
+    expect(after.total).toBe(before.total + 1);
+    expect(after.byStatus.open).toBe(before.byStatus.open + 1);
+    expect((await summary(agentHeaders)).total).toBeGreaterThanOrEqual(after.total);
+  });
   it("keeps one homepage notice per organization that only admins can set or clear", async () => {
     const requesterHeaders = { cookie: acmeCookie, "x-csrf-token": acmeCsrf, "x-organization-id": acmeOrg };
     const admin = await login("admin@acme.test");
     const adminHeaders = { cookie: admin.cookie, "x-csrf-token": admin.csrf, "x-organization-id": acmeOrg };
     const read = async (headers: Record<string, string>) => (await app.inject({ method: "GET", url: "/v1/notice", headers })).json().notice;
+    // The notice is a per-organization singleton, so keep whatever a developer has set locally and restore it afterwards.
+    const existing = await read(adminHeaders);
     await app.inject({ method: "DELETE", url: "/v1/notice", headers: adminHeaders });
     expect(await read(requesterHeaders)).toBeNull();
     expect((await app.inject({ method: "PUT", url: "/v1/notice", headers: requesterHeaders, payload: { kind: "incident", message: "Not allowed" } })).statusCode).toBe(403);
@@ -97,6 +111,7 @@ describe.runIf(process.env.RUN_INTEGRATION_TESTS === "true")("tenant and visibil
     expect((await app.inject({ method: "DELETE", url: "/v1/notice", headers: requesterHeaders })).statusCode).toBe(403);
     expect((await app.inject({ method: "DELETE", url: "/v1/notice", headers: adminHeaders })).statusCode).toBe(204);
     expect(await read(requesterHeaders)).toBeNull();
+    if (existing) await app.inject({ method: "PUT", url: "/v1/notice", headers: adminHeaders, payload: { kind: existing.kind, message: existing.message } });
   });
   it("links ticket images to the new ticket and limits who can view them", async () => {
     const requesterHeaders = { cookie: acmeCookie, "x-csrf-token": acmeCsrf, "x-organization-id": acmeOrg };

@@ -8,6 +8,7 @@ import { AnnouncementBanners } from "./announcement-banners";
 import { HomeNotice } from "./home-notice";
 import { Icon } from "./icons";
 import { markdownExcerpt, toStoredMarkdown } from "./rich-content";
+import { statusBreakdown, ticketNoun, type TicketSummary } from "./ticket-summary";
 
 type Membership = { organization_id: string; name: string; role: "requester" | "agent" | "admin" };
 type Session = { user: { id: string; email: string; displayName: string }; memberships: Membership[]; csrfToken: string };
@@ -37,6 +38,7 @@ export function Desk() {
   const [searchValue, setSearchValue] = useState("");
   const [ticketQuery, setTicketQuery] = useState("");
   const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [summary, setSummary] = useState<TicketSummary | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [view, setView] = useState<View>("tickets");
   const [announcementsVersion, setAnnouncementsVersion] = useState(0);
@@ -47,7 +49,8 @@ export function Desk() {
     const requestId = ++listRequestId.current;
     const params = new URLSearchParams(query);
     if (cursor) params.set("cursor", cursor);
-    if (!cursor) { setNextCursor(null); setLoadingMore(false); }
+    // Every fresh load (filter, search, create, update, workspace switch) also refreshes the header counts.
+    if (!cursor) { setNextCursor(null); setLoadingMore(false); request<TicketSummary>("/v1/tickets/summary", {}, organizationId).then((value) => { if (requestId === listRequestId.current) setSummary(value); }).catch(() => undefined); }
     else setLoadingMore(true);
     try {
       const data = await request<{ items: Ticket[]; nextCursor: string | null }>(`/v1/tickets${params.size ? `?${params}` : ""}`, {}, organizationId);
@@ -80,6 +83,8 @@ export function Desk() {
 
   // On narrow screens the workspace links collapse into one button that cycles through the views.
   const nextView = views[(views.findIndex((item) => item.value === view) + 1) % views.length]!;
+  const breakdown = summary ? statusBreakdown(summary) : [];
+  const summaryNoun = ticketNoun(summary?.total ?? 0, membership?.role === "requester");
 
   return <div className="app-shell">
     <GlobalNav user={session.user} view={view} onView={setView} onLogout={() => void logout()}/>
@@ -93,7 +98,7 @@ export function Desk() {
     {orgId && <AnnouncementBanners orgId={orgId} refreshKey={announcementsVersion}/>}
     {view === "announcements" ? <Announcements orgId={orgId} role={membership?.role ?? "requester"} onChanged={() => setAnnouncementsVersion((value) => value + 1)}/> : view === "knowledge" ? <Knowledge orgId={orgId} role={membership?.role ?? "requester"}/> : <main className="dashboard" id="inbox">
       <HomeNotice orgId={orgId} role={membership?.role ?? "requester"}/>
-      <section className="dashboard-intro"><div><p className="overline">SUPPORT INBOX</p><h1>Every conversation,<br/> in one place.</h1><p className="intro-copy">Listen, respond, and resolve with the full customer story in view.</p></div><div className="intro-stat" aria-label={`${tickets.length} tickets in this view`}><strong>{tickets.length}</strong><span>in this view</span></div></section>
+      <section className="dashboard-intro"><div><p className="overline">SUPPORT INBOX</p><h1>Every conversation,<br/> in one place.</h1><p className="intro-copy">Listen, respond, and resolve with the full customer story in view.</p></div>{summary && <div className="intro-stat" aria-label={`${summary.total} ${summaryNoun}${breakdown.length ? `: ${breakdown.join(", ")}` : ""}`}><strong>{summary.total}</strong><span>{summaryNoun}</span>{breakdown.length > 0 && <ul className="status-breakdown">{breakdown.map((item) => <li key={item}>{item}</li>)}</ul>}</div>}</section>
       <section className="inbox-toolbar" aria-label="Ticket controls">
         <div className="segmented-control">{[{ label: "All", value: "" }, { label: "Open", value: "open" }, { label: "Waiting", value: "waiting" }, { label: "Closed", value: "closed" }].map((item) => <button key={item.label} className={activeStatus === item.value ? "active" : ""} onClick={() => filter(item.value)}>{item.label}</button>)}</div>
         <form className="search-field" onSubmit={search} role="search"><Icon name="search" size={16}/><input name="search" maxLength={200} value={searchValue} onChange={(event) => setSearchValue(event.target.value)} placeholder="Search tickets" aria-label="Search tickets"/><button className="sr-only">Search</button></form>

@@ -614,6 +614,7 @@ Base path `/v1` (behind `/api` on Amplify). 🔒 means a session plus `x-organiz
 | GET | `/v1/auth/me` | cookie | – | Restores the session: user, memberships, csrfToken |
 | GET | `/v1/members` | 🔒 | agent+ | Organization members and roles |
 | GET | `/v1/tickets` | 🔒 | any | `?status&priority&assigneeId&search&limit(≤100)&cursor` → `{items, nextCursor}` |
+| GET | `/v1/tickets/summary` | 🔒 | any | `{total, byStatus}` for the inbox header, ignoring filters and pagination; requesters count only their own tickets |
 | POST | `/v1/tickets` | 🔒 | any | `{title, description, priority, descriptionFormat}` |
 | GET | `/v1/tickets/:id` | 🔒 | any | Ticket plus visible comments, attachments, and activity (agents) |
 | PATCH | `/v1/tickets/:id` | 🔒 | agent+ | `{version, status?, priority?, assigneeId?}` → `409` on a stale version |
@@ -716,11 +717,13 @@ To run the worker locally, start a queue (for example `awslocal sqs create-queue
 | Auth contract | `apps/api/test/auth.test.ts` | Vitest | CSRF token in the login and `/me` bodies, HttpOnly CSRF cookie, cookie reissue |
 | Markdown guard | `apps/api/test/markdown.test.ts` | Vitest | `ticketImageIds` allow-list and de-duplication |
 | Knowledge permissions | `apps/api/test/knowledge.test.ts` | Vitest | Admin-only writes with audit, raster-only images, a session required for images |
+| Ticket summary | `apps/api/test/ticket-summary.test.ts` | Vitest | Every status totalled including empty ones, requesters scoped to their own tickets |
 | Announcement permissions | `apps/api/test/announcements.test.ts` | Vitest | Admin-only post, edit and delete with audit, kind and end-time validation, the active filter |
 | Notice permissions | `apps/api/test/notice.test.ts` | Vitest | Admin-only set and clear with audit, CSRF required on `PUT`, `409` on a stale version, notice-only kinds |
-| **Integration** | `apps/api/test/integration.test.ts` | Vitest + real PostgreSQL (`RUN_INTEGRATION_TESTS=true`) | Tenant isolation, requesters cannot write internal notes, a foreign-organization session is rejected, ticket-image linking and visibility, internal-note images hidden from requesters, announcements are admin-only, leave the banners once ended, a single admin-only notice per organization with stale-version and cross-organization checks, stay inside the organization and reject stale edits, cursor pagination returns every ticket exactly once |
+| **Integration** | `apps/api/test/integration.test.ts` | Vitest + real PostgreSQL (`RUN_INTEGRATION_TESTS=true`) | Tenant isolation, requesters cannot write internal notes, a foreign-organization session is rejected, ticket-image linking and visibility, internal-note images hidden from requesters, announcements are admin-only, leave the banners once ended, a single admin-only notice per organization with stale-version and cross-organization checks (restoring any notice set locally), ticket summary counts, stay inside the organization and reject stale edits, cursor pagination returns every ticket exactly once |
 | Web headers | `apps/web/test/request-headers.test.mjs` | `node:test` | Bodyless POSTs send `{}`, content type, caller headers preserved |
 | Web announcements | `apps/web/test/announcement-kinds.test.mjs` | `node:test` | Banner order (incident, maintenance, news), ended and dismissed banners hidden, edits re-shown, end-time round-trip |
+| Web ticket summary | `apps/web/test/ticket-summary.test.mjs` | `node:test` | Inbox header wording: status breakdown order, empty statuses skipped, singular and "your" |
 | Web rich content | `apps/web/test/rich-content.test.mjs` | `node:test` | Image reference round-trips, Markdown detection, excerpts, uploaded-image detection |
 | Load | `load-tests/baseline.js` | k6 | Constant-arrival-rate ticket listing with thresholds: error rate < 0.5 %, read p95 < 300 ms, rate-limited < 1 % |
 

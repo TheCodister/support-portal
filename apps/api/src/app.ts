@@ -123,6 +123,14 @@ export async function buildApp(deps: Dependencies = {}): Promise<FastifyInstance
     const result = await db.query(`SELECT t.*,r.display_name requester_name,a.display_name assignee_name FROM tickets t JOIN users r ON r.id=t.requester_id LEFT JOIN users a ON a.id=t.assignee_id WHERE ${conditions.join(" AND ")} ORDER BY t.created_at DESC,t.id DESC LIMIT $${values.length}`, values);
     const hasMore = result.rows.length > limit; const items = result.rows.slice(0, limit); return { items, nextCursor: hasMore ? makeCursor(items.at(-1)) : null };
   });
+  // Counts for the inbox header, independent of the list's filters and pagination. Requesters count only their own tickets.
+  app.get("/v1/tickets/summary", { preHandler: authenticate }, async (request) => {
+    const own = request.auth.role === "requester";
+    const result = await db.query<{ status: string; count: number }>(`SELECT status,count(*)::int count FROM tickets WHERE organization_id=$1 ${own ? "AND requester_id=$2" : ""} GROUP BY status`, own ? [request.auth.organizationId, request.auth.userId] : [request.auth.organizationId]);
+    const byStatus: Record<string, number> = { open: 0, in_progress: 0, waiting: 0, closed: 0 };
+    for (const row of result.rows) byStatus[row.status] = row.count;
+    return { total: Object.values(byStatus).reduce((sum, value) => sum + value, 0), byStatus };
+  });
   app.post("/v1/tickets", { preHandler: authenticate }, async (request, reply) => {
     const input = createTicketSchema.parse(request.body); const auth = request.auth;
     const imageIds = input.descriptionFormat === "markdown" ? ticketImageIds(input.description) : [];

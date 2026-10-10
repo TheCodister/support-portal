@@ -58,13 +58,15 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .icon-button { width: 44px; height: 44px; border: 0; display: grid; place-items: center; border-radius: 50%; background: rgb(210 210 215 / 64%); }
 
 .dashboard { width: min(100% - 48px, 1380px); margin: auto; padding: 72px 0 80px; }
-.dashboard-intro { width: min(100%, 1100px); margin: auto 0 56px; display: flex; align-items: flex-end; justify-content: space-between; gap: 32px; }
+.dashboard-intro { width: 100%; margin: auto 0 56px; display: flex; align-items: flex-end; justify-content: space-between; gap: 32px; }
 .overline { margin: 0 0 10px; color: var(--blue); font-size: 12px; line-height: 1; font-weight: 600; letter-spacing: .08em; }
 .dashboard-intro h1, .login-message h1 { margin: 0; font: 600 56px/1.07 "SF Pro Display", system-ui, sans-serif; letter-spacing: -.6px; }
 .intro-copy { max-width: 600px; margin: 20px 0 0; color: var(--muted); font: 300 24px/1.5 "SF Pro Text", system-ui, sans-serif; letter-spacing: -.2px; }
 .intro-stat { padding: 0 0 4px; display: flex; flex-direction: column; align-items: flex-end; color: var(--muted); }
 .intro-stat strong { color: var(--ink); font: 600 40px/1 "SF Pro Display", system-ui, sans-serif; }
 .intro-stat span { margin-top: 7px; font-size: 12px; }
+.status-breakdown { margin: 10px 0 0; padding: 0; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px 0; list-style: none; color: var(--ink-soft); font-size: 13px; }
+.status-breakdown li + li::before { margin: 0 8px; color: var(--muted-light); content: "·"; }
 
 .inbox-toolbar { min-height: 68px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
 .segmented-control { display: flex; gap: 4px; padding: 4px; border-radius: var(--radius-pill); background: #e8e8ed; }
@@ -289,13 +291,13 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .optional { margin-left: 4px; color: var(--muted-light); font-weight: 400; }
 
 /* The pinned inbox notice: larger than a banner and without a dismiss button. */
-.home-notice { width: min(100%, 1100px); margin: 0 0 48px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: 16px; padding: 20px 22px; border: 1px solid var(--tone-border); border-left: 6px solid var(--tone); border-radius: var(--radius-card); color: var(--tone-ink); background: var(--tone-bg); }
+.home-notice { width: 100%; margin: 0 0 48px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: 16px; padding: 20px 22px; border: 1px solid var(--tone-border); border-left: 6px solid var(--tone); border-radius: var(--radius-card); color: var(--tone-ink); background: var(--tone-bg); }
 .notice-icon { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 50%; color: white; background: var(--tone); }
 .notice-label { margin: 0 0 6px; color: var(--tone); font-size: 12px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
 .notice-message { margin: 0; color: var(--tone-ink); font: 600 19px/1.4 "SF Pro Display", system-ui, sans-serif; letter-spacing: -.2px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .notice-text small { display: block; margin-top: 8px; color: var(--tone-ink); font-size: 12px; opacity: .75; }
 .notice-edit { border-color: var(--tone); color: var(--tone-ink); background: white; }
-.notice-empty { width: min(100%, 1100px); min-height: 52px; margin: 0 0 40px; display: flex; align-items: center; gap: 8px; padding: 12px 18px; border: 1px dashed #c7c7cc; border-radius: var(--radius-card); color: var(--muted); background: transparent; font-size: 14px; }
+.notice-empty { width: 100%; min-height: 52px; margin: 0 0 40px; display: flex; align-items: center; gap: 8px; padding: 12px 18px; border: 1px dashed #c7c7cc; border-radius: var(--radius-card); color: var(--muted); background: transparent; font-size: 14px; }
 .notice-empty:hover { border-color: var(--blue); color: var(--blue); }
 .notice-empty:active { transform: none; }
 .notice-clear { display: inline-flex; align-items: center; gap: 6px; margin-right: auto; }
@@ -306,6 +308,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   .inbox-frame { grid-template-columns: minmax(300px, 42%) minmax(420px, 58%); }
   .ticket-detail { padding-inline: 28px; }
   .workspace-identity { min-width: 220px; }
+  /* Customers and Reports are placeholders; dropping them keeps New ticket inside the bar. */
+  .workspace-links button:disabled { display: none; }
 }
 
 @media (max-width: 833px) {
