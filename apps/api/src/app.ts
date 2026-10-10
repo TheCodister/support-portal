@@ -7,7 +7,7 @@ import { HeadObjectCommand, GetObjectCommand, S3Client } from "@aws-sdk/client-s
 import { createPresignedPost } from "@aws-sdk/s3-presigned-post";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { z, ZodError } from "zod";
-import { announcementKinds, attachmentRequestSchema, createAnnouncementSchema, createArticleSchema, createCommentSchema, createTicketSchema, imageUploadSchema, loginSchema, updateAnnouncementSchema, updateArticleSchema, updateTicketSchema, type Role } from "@supportdesk/contracts";
+import { announcementKinds, attachmentRequestSchema, createAnnouncementSchema, createArticleSchema, createCommentSchema, createTicketSchema, imageUploadSchema, loginSchema, setNoticeSchema, updateAnnouncementSchema, updateArticleSchema, updateTicketSchema, type Role } from "@supportdesk/contracts";
 import { createPool, transaction, type Database } from "@supportdesk/database";
 import { ticketImageIds } from "./markdown.js";
 import { token, tokenHash, verifyPassword } from "./security.js";
@@ -45,13 +45,13 @@ export async function buildApp(deps: Dependencies = {}): Promise<FastifyInstance
   });
   app.decorate("db", db);
   await app.register(cookie);
-  await app.register(cors, { origin: (origin, cb) => cb(null, !origin || origin === (process.env.WEB_ORIGIN ?? "http://localhost:3000")), credentials: true, methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"], allowedHeaders: ["content-type", "x-csrf-token", "x-organization-id", "x-request-id"] });
+  await app.register(cors, { origin: (origin, cb) => cb(null, !origin || origin === (process.env.WEB_ORIGIN ?? "http://localhost:3000")), credentials: true, methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"], allowedHeaders: ["content-type", "x-csrf-token", "x-organization-id", "x-request-id"] });
   await app.register(helmet, { contentSecurityPolicy: false });
   await app.register(rateLimit, { max: Number(process.env.RATE_LIMIT_MAX ?? 300), timeWindow: "1 minute" });
 
   app.addHook("onClose", async () => { if (!deps.db) await db.end(); });
   app.addHook("onRequest", async (request) => {
-    if (["POST", "PATCH", "DELETE"].includes(request.method) && request.url !== "/v1/auth/login") {
+    if (!["GET", "HEAD", "OPTIONS"].includes(request.method) && request.url !== "/v1/auth/login") {
       const header = request.headers["x-csrf-token"];
       if (!header || header !== request.cookies[CSRF_COOKIE]) throw httpError(403, "Invalid CSRF token", "csrf_invalid");
     }
@@ -122,6 +122,14 @@ export async function buildApp(deps: Dependencies = {}): Promise<FastifyInstance
     values.push(limit + 1);
     const result = await db.query(`SELECT t.*,r.display_name requester_name,a.display_name assignee_name FROM tickets t JOIN users r ON r.id=t.requester_id LEFT JOIN users a ON a.id=t.assignee_id WHERE ${conditions.join(" AND ")} ORDER BY t.created_at DESC,t.id DESC LIMIT $${values.length}`, values);
     const hasMore = result.rows.length > limit; const items = result.rows.slice(0, limit); return { items, nextCursor: hasMore ? makeCursor(items.at(-1)) : null };
+  });
+  // Counts for the inbox header, independent of the list's filters and pagination. Requesters count only their own tickets.
+  app.get("/v1/tickets/summary", { preHandler: authenticate }, async (request) => {
+    const own = request.auth.role === "requester";
+    const result = await db.query<{ status: string; count: number }>(`SELECT status,count(*)::int count FROM tickets WHERE organization_id=$1 ${own ? "AND requester_id=$2" : ""} GROUP BY status`, own ? [request.auth.organizationId, request.auth.userId] : [request.auth.organizationId]);
+    const byStatus: Record<string, number> = { open: 0, in_progress: 0, waiting: 0, closed: 0 };
+    for (const row of result.rows) byStatus[row.status] = row.count;
+    return { total: Object.values(byStatus).reduce((sum, value) => sum + value, 0), byStatus };
   });
   app.post("/v1/tickets", { preHandler: authenticate }, async (request, reply) => {
     const input = createTicketSchema.parse(request.body); const auth = request.auth;
@@ -310,6 +318,30 @@ export async function buildApp(deps: Dependencies = {}): Promise<FastifyInstance
       const result = await client.query("DELETE FROM announcements WHERE organization_id=$1 AND id=$2 RETURNING kind,title", [auth.organizationId, id]); const row = result.rows[0];
       if (!row) throw httpError(404, "Announcement not found", "not_found");
       await client.query("INSERT INTO audit_events(organization_id,actor_id,action,entity_type,entity_id,data) VALUES($1,$2,'announcement.deleted','announcement',$3,$4)", [auth.organizationId, auth.userId, id, JSON.stringify({ kind: row.kind, title: row.title })]);
+    }); return reply.status(204).send();
+  });
+
+  // One notice per organization, pinned to the inbox. Members cannot dismiss it; admins set, change or clear it.
+  app.get("/v1/notice", { preHandler: authenticate }, async (request) => {
+    const result = await db.query("SELECT n.*,u.display_name updated_by_name FROM organization_notices n JOIN users u ON u.id=n.updated_by WHERE n.organization_id=$1", [request.auth.organizationId]);
+    return { notice: result.rows[0] ?? null };
+  });
+  app.put("/v1/notice", { preHandler: authenticate }, async (request) => {
+    requireAdmin(request); const input = setNoticeSchema.parse(request.body); const auth = request.auth;
+    return transaction(db, async (client) => {
+      const result = input.version === undefined
+        ? await client.query("INSERT INTO organization_notices(organization_id,kind,message,updated_by) VALUES($1,$2,$3,$4) ON CONFLICT (organization_id) DO NOTHING RETURNING *", [auth.organizationId, input.kind, input.message, auth.userId])
+        : await client.query("UPDATE organization_notices SET kind=$3,message=$4,updated_by=$5,version=version+1,updated_at=now() WHERE organization_id=$1 AND version=$2 RETURNING *", [auth.organizationId, input.version, input.kind, input.message, auth.userId]);
+      const row = result.rows[0]; if (!row) throw httpError(409, "The notice was changed by another admin", "version_conflict");
+      await client.query("INSERT INTO audit_events(organization_id,actor_id,action,entity_type,entity_id,data) VALUES($1,$2,'notice.set','notice',$1,$3)", [auth.organizationId, auth.userId, JSON.stringify({ kind: row.kind, version: row.version })]); return row;
+    });
+  });
+  app.delete("/v1/notice", { preHandler: authenticate }, async (request, reply) => {
+    requireAdmin(request); const auth = request.auth;
+    await transaction(db, async (client) => {
+      const result = await client.query("DELETE FROM organization_notices WHERE organization_id=$1 RETURNING kind", [auth.organizationId]);
+      if (!result.rows[0]) throw httpError(404, "There is no notice to clear", "not_found");
+      await client.query("INSERT INTO audit_events(organization_id,actor_id,action,entity_type,entity_id,data) VALUES($1,$2,'notice.cleared','notice',$1,$3)", [auth.organizationId, auth.userId, JSON.stringify({ kind: result.rows[0].kind })]);
     }); return reply.status(204).send();
   });
   return app;

@@ -49,7 +49,8 @@ SupportDesk is a **modular monolith**: a Next.js frontend, one stateless Fastify
 | **Attachments** | Files up to 10 MB, uploaded straight from the browser to S3 through presigned POSTs and downloaded through short-lived presigned URLs. |
 | **Knowledge base** | Admin-authored articles with images, full-text search, and optimistic concurrency. Every member of the organization can read them. |
 | **Announcements** | Admins post **news** (green), **maintenance** (amber) or **incident** (red) announcements with an optional end time. Active ones show as color-coded banners across the workspace, most severe first; each member can dismiss one, and an edit shows it again. |
-| **Audit trail** | Every ticket, comment, article and announcement change writes an `audit_events` row in the same transaction. Agents see it as the ticket's activity. |
+| **Inbox notice** | One notice per organization pinned to the top of the tickets inbox: **Released** (green), **Maintenance** (amber) or **Incident** (red). Members cannot dismiss it; admins change or clear it. |
+| **Audit trail** | Every ticket, comment, article, announcement and notice change writes an `audit_events` row in the same transaction. Agents see it as the ticket's activity. |
 | **Background events** | Ticket and comment changes write a transactional **outbox** event. A worker publishes it to SQS, and an idempotent consumer handles it. |
 
 Seeded demo tenants: **Acme** (admin, agent, requester) and **Globex** (admin). Globex exists to prove tenant isolation.
@@ -91,6 +92,7 @@ Seeded demo tenants: **Acme** (admin, agent, requester) and **Globex** (admin). 
 │   │   ├── app/desk.tsx       sign-in, organization switcher, inbox, ticket detail
 │   │   ├── app/knowledge.tsx  knowledge-base list, reader and editor
 │   │   ├── app/announcements.tsx, announcement-banners.tsx, announcement-kinds.ts   announcement view, workspace banners, kind colors and banner rules
+│   │   ├── app/home-notice.tsx  the pinned inbox notice and its admin form
 │   │   ├── app/rich-text-editor.tsx, ticket-editors.tsx, article-editor.tsx   Tiptap editors
 │   │   ├── app/rich-content.ts  image reference rewriting and Markdown detection
 │   │   ├── app/api.ts, request-headers.ts   fetch wrapper (CSRF and organization headers)
@@ -148,7 +150,7 @@ flowchart LR
     direction TB
     MW["Hooks: CORS · Helmet · rate limit<br/>CSRF check · error handler"]
     AUTH["authenticate()<br/>session + membership + role"]
-    MODS["Modules<br/>auth · members · tickets · comments<br/>attachments · ticket images · knowledge · announcements"]
+    MODS["Modules<br/>auth · members · tickets · comments<br/>attachments · ticket images · knowledge · announcements · notice"]
     MW --> AUTH --> MODS
   end
 
@@ -409,7 +411,7 @@ sequenceDiagram
 | `supportdesk_session` | bearer session token |
 | `supportdesk_csrf` | double-submit CSRF token |
 
-**CSRF.** Because the CSRF cookie is `HttpOnly`, the API also returns the token in the body of `login` and `GET /v1/auth/me`. The web client keeps it in memory and echoes it in `x-csrf-token` on every `POST`, `PATCH` and `DELETE`. The API rejects a mutation (except login) whose header differs from the cookie. `/auth/me` reissues the CSRF cookie if it is missing.
+**CSRF.** Because the CSRF cookie is `HttpOnly`, the API also returns the token in the body of `login` and `GET /v1/auth/me`. The web client keeps it in memory and echoes it in `x-csrf-token` on every request other than `GET` and `HEAD`. The API rejects any method other than `GET`, `HEAD` and `OPTIONS` (except login) whose header differs from the cookie. `/auth/me` reissues the CSRF cookie if it is missing.
 
 **Organization selection.** Every scoped route needs `x-organization-id`. `authenticate()` joins `sessions` with `memberships` for that organization in a single query. A valid session paired with an organization the user does not belong to gets `403`.
 
@@ -428,6 +430,8 @@ sequenceDiagram
 | Create or edit articles, upload knowledge images | ❌ | ❌ | ✅ |
 | Read announcements and see their banners | ✅ | ✅ | ✅ |
 | Post, edit or delete announcements | ❌ | ❌ | ✅ |
+| See the inbox notice (cannot dismiss it) | ✅ | ✅ | ✅ |
+| Set, change or clear the inbox notice | ❌ | ❌ | ✅ |
 
 Requesters get `404` (not `403`) for tickets they do not own, so the API does not reveal that a ticket exists. Assignees must be agents or admins in the same organization.
 
@@ -454,6 +458,7 @@ erDiagram
   organizations ||--o{ knowledge_articles : scopes
   organizations ||--o{ knowledge_images : scopes
   organizations ||--o{ announcements : scopes
+  organizations ||--o| organization_notices : pins
   organizations ||--o{ audit_events : scopes
   organizations ||--o{ outbox_events : scopes
 
@@ -544,6 +549,13 @@ erDiagram
     uuid author_id
     int version
   }
+  organization_notices {
+    uuid organization_id PK
+    text kind
+    text message
+    uuid updated_by
+    int version
+  }
   audit_events {
     uuid id PK
     uuid organization_id
@@ -578,6 +590,7 @@ erDiagram
 | `003_ticket_rich_text.sql` | `tickets.description_format`, ticket_images |
 | `004_comment_rich_text.sql` | `comments.body_format`, `ticket_images.comment_id` |
 | `005_announcements.sql` | announcements (`kind` is `news`, `maintenance` or `incident`) |
+| `006_organization_notices.sql` | organization_notices, keyed by organization so there is at most one (`kind` is `released`, `maintenance` or `incident`) |
 
 Key indexes:
 
@@ -601,6 +614,7 @@ Base path `/v1` (behind `/api` on Amplify). 🔒 means a session plus `x-organiz
 | GET | `/v1/auth/me` | cookie | – | Restores the session: user, memberships, csrfToken |
 | GET | `/v1/members` | 🔒 | agent+ | Organization members and roles |
 | GET | `/v1/tickets` | 🔒 | any | `?status&priority&assigneeId&search&limit(≤100)&cursor` → `{items, nextCursor}` |
+| GET | `/v1/tickets/summary` | 🔒 | any | `{total, byStatus}` for the inbox header, ignoring filters and pagination; requesters count only their own tickets |
 | POST | `/v1/tickets` | 🔒 | any | `{title, description, priority, descriptionFormat}` |
 | GET | `/v1/tickets/:id` | 🔒 | any | Ticket plus visible comments, attachments, and activity (agents) |
 | PATCH | `/v1/tickets/:id` | 🔒 | agent+ | `{version, status?, priority?, assigneeId?}` → `409` on a stale version |
@@ -622,6 +636,9 @@ Base path `/v1` (behind `/api` on Amplify). 🔒 means a session plus `x-organiz
 | POST | `/v1/announcements` | 🔒 | admin | `{kind, title, body, endsAt?}` (`endsAt` is an ISO timestamp with an offset, or `null`) |
 | PATCH | `/v1/announcements/:id` | 🔒 | admin | `{version, kind, title, body, endsAt}` → `409` on a stale version |
 | DELETE | `/v1/announcements/:id` | 🔒 | admin | `204` |
+| GET | `/v1/notice` | 🔒 | any | `{notice}`, or `{notice: null}` when none is set |
+| PUT | `/v1/notice` | 🔒 | admin | `{kind, message, version?}`. Without `version` it only creates; with one it only updates that version. Otherwise `409` |
+| DELETE | `/v1/notice` | 🔒 | admin | Clear the notice, `204` (`404` if none) |
 
 Request schemas are defined once in [`packages/contracts/src/index.ts`](packages/contracts/src/index.ts).
 
@@ -700,10 +717,13 @@ To run the worker locally, start a queue (for example `awslocal sqs create-queue
 | Auth contract | `apps/api/test/auth.test.ts` | Vitest | CSRF token in the login and `/me` bodies, HttpOnly CSRF cookie, cookie reissue |
 | Markdown guard | `apps/api/test/markdown.test.ts` | Vitest | `ticketImageIds` allow-list and de-duplication |
 | Knowledge permissions | `apps/api/test/knowledge.test.ts` | Vitest | Admin-only writes with audit, raster-only images, a session required for images |
+| Ticket summary | `apps/api/test/ticket-summary.test.ts` | Vitest | Every status totalled including empty ones, requesters scoped to their own tickets |
 | Announcement permissions | `apps/api/test/announcements.test.ts` | Vitest | Admin-only post, edit and delete with audit, kind and end-time validation, the active filter |
-| **Integration** | `apps/api/test/integration.test.ts` | Vitest + real PostgreSQL (`RUN_INTEGRATION_TESTS=true`) | Tenant isolation, requesters cannot write internal notes, a foreign-organization session is rejected, ticket-image linking and visibility, internal-note images hidden from requesters, announcements are admin-only, leave the banners once ended, stay inside the organization and reject stale edits, cursor pagination returns every ticket exactly once |
+| Notice permissions | `apps/api/test/notice.test.ts` | Vitest | Admin-only set and clear with audit, CSRF required on `PUT`, `409` on a stale version, notice-only kinds |
+| **Integration** | `apps/api/test/integration.test.ts` | Vitest + real PostgreSQL (`RUN_INTEGRATION_TESTS=true`) | Tenant isolation, requesters cannot write internal notes, a foreign-organization session is rejected, ticket-image linking and visibility, internal-note images hidden from requesters, announcements are admin-only, leave the banners once ended, a single admin-only notice per organization with stale-version and cross-organization checks (restoring any notice set locally), ticket summary counts, stay inside the organization and reject stale edits, cursor pagination returns every ticket exactly once |
 | Web headers | `apps/web/test/request-headers.test.mjs` | `node:test` | Bodyless POSTs send `{}`, content type, caller headers preserved |
 | Web announcements | `apps/web/test/announcement-kinds.test.mjs` | `node:test` | Banner order (incident, maintenance, news), ended and dismissed banners hidden, edits re-shown, end-time round-trip |
+| Web ticket summary | `apps/web/test/ticket-summary.test.mjs` | `node:test` | Inbox header wording: status breakdown order, empty statuses skipped, singular and "your" |
 | Web rich content | `apps/web/test/rich-content.test.mjs` | `node:test` | Image reference round-trips, Markdown detection, excerpts, uploaded-image detection |
 | Load | `load-tests/baseline.js` | k6 | Constant-arrival-rate ticket listing with thresholds: error rate < 0.5 %, read p95 < 300 ms, rate-limited < 1 % |
 
