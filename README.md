@@ -48,7 +48,8 @@ SupportDesk is a **modular monolith**: a Next.js frontend, one stateless Fastify
 | **Images** | Images pasted or dropped into the editor are uploaded to private S3 and referenced by ID, never by an outside URL. |
 | **Attachments** | Files up to 10 MB, uploaded straight from the browser to S3 through presigned POSTs and downloaded through short-lived presigned URLs. |
 | **Knowledge base** | Admin-authored articles with images, full-text search, and optimistic concurrency. Every member of the organization can read them. |
-| **Audit trail** | Every ticket, comment and article change writes an `audit_events` row in the same transaction. Agents see it as the ticket's activity. |
+| **Announcements** | Admins post **news** (green), **maintenance** (amber) or **incident** (red) announcements with an optional end time. Active ones show as color-coded banners across the workspace, most severe first; each member can dismiss one, and an edit shows it again. |
+| **Audit trail** | Every ticket, comment, article and announcement change writes an `audit_events` row in the same transaction. Agents see it as the ticket's activity. |
 | **Background events** | Ticket and comment changes write a transactional **outbox** event. A worker publishes it to SQS, and an idempotent consumer handles it. |
 
 Seeded demo tenants: **Acme** (admin, agent, requester) and **Globex** (admin). Globex exists to prove tenant isolation.
@@ -89,6 +90,7 @@ Seeded demo tenants: **Acme** (admin, agent, requester) and **Globex** (admin). 
 │   ├── web/                 Next.js client (one page, runs entirely in the browser)
 │   │   ├── app/desk.tsx       sign-in, organization switcher, inbox, ticket detail
 │   │   ├── app/knowledge.tsx  knowledge-base list, reader and editor
+│   │   ├── app/announcements.tsx, announcement-banners.tsx, announcement-kinds.ts   announcement view, workspace banners, kind colors and banner rules
 │   │   ├── app/rich-text-editor.tsx, ticket-editors.tsx, article-editor.tsx   Tiptap editors
 │   │   ├── app/rich-content.ts  image reference rewriting and Markdown detection
 │   │   ├── app/api.ts, request-headers.ts   fetch wrapper (CSRF and organization headers)
@@ -139,14 +141,14 @@ One stateless API owns every business rule. The browser talks only to the API (J
 ```mermaid
 flowchart LR
   subgraph Browser
-    UI["Next.js SPA<br/>(Desk + Knowledge base)"]
+    UI["Next.js SPA<br/>(Desk + Knowledge base + Announcements)"]
   end
 
   subgraph API["Fastify API (stateless)"]
     direction TB
     MW["Hooks: CORS · Helmet · rate limit<br/>CSRF check · error handler"]
     AUTH["authenticate()<br/>session + membership + role"]
-    MODS["Modules<br/>auth · members · tickets · comments<br/>attachments · ticket images · knowledge"]
+    MODS["Modules<br/>auth · members · tickets · comments<br/>attachments · ticket images · knowledge · announcements"]
     MW --> AUTH --> MODS
   end
 
@@ -424,6 +426,8 @@ sequenceDiagram
 | Update status, priority, assignee; list members | ❌ | ✅ | ✅ |
 | Read knowledge base | ✅ | ✅ | ✅ |
 | Create or edit articles, upload knowledge images | ❌ | ❌ | ✅ |
+| Read announcements and see their banners | ✅ | ✅ | ✅ |
+| Post, edit or delete announcements | ❌ | ❌ | ✅ |
 
 Requesters get `404` (not `403`) for tickets they do not own, so the API does not reveal that a ticket exists. Assignees must be agents or admins in the same organization.
 
@@ -449,6 +453,7 @@ erDiagram
   comments |o--o{ ticket_images : "linked on save"
   organizations ||--o{ knowledge_articles : scopes
   organizations ||--o{ knowledge_images : scopes
+  organizations ||--o{ announcements : scopes
   organizations ||--o{ audit_events : scopes
   organizations ||--o{ outbox_events : scopes
 
@@ -529,6 +534,16 @@ erDiagram
     text object_key UK
     upload_state state
   }
+  announcements {
+    uuid id PK
+    uuid organization_id
+    text kind
+    text title
+    text body
+    timestamptz ends_at
+    uuid author_id
+    int version
+  }
   audit_events {
     uuid id PK
     uuid organization_id
@@ -562,6 +577,7 @@ erDiagram
 | `002_knowledge.sql` | knowledge_articles, knowledge_images |
 | `003_ticket_rich_text.sql` | `tickets.description_format`, ticket_images |
 | `004_comment_rich_text.sql` | `comments.body_format`, `ticket_images.comment_id` |
+| `005_announcements.sql` | announcements (`kind` is `news`, `maintenance` or `incident`) |
 
 Key indexes:
 
@@ -602,6 +618,10 @@ Base path `/v1` (behind `/api` on Amplify). 🔒 means a session plus `x-organiz
 | POST | `/v1/knowledge/images` | 🔒 | admin | Allocate a knowledge image |
 | POST | `/v1/knowledge/images/:id/complete` | 🔒 | admin | Verify the upload |
 | GET | `/v1/knowledge/images/:id` | cookie | member | `302` to a presigned URL |
+| GET | `/v1/announcements` | 🔒 | any | `?kind&active&limit&cursor`, newest first; `active=true` drops those whose `ends_at` has passed |
+| POST | `/v1/announcements` | 🔒 | admin | `{kind, title, body, endsAt?}` (`endsAt` is an ISO timestamp with an offset, or `null`) |
+| PATCH | `/v1/announcements/:id` | 🔒 | admin | `{version, kind, title, body, endsAt}` → `409` on a stale version |
+| DELETE | `/v1/announcements/:id` | 🔒 | admin | `204` |
 
 Request schemas are defined once in [`packages/contracts/src/index.ts`](packages/contracts/src/index.ts).
 
@@ -680,8 +700,10 @@ To run the worker locally, start a queue (for example `awslocal sqs create-queue
 | Auth contract | `apps/api/test/auth.test.ts` | Vitest | CSRF token in the login and `/me` bodies, HttpOnly CSRF cookie, cookie reissue |
 | Markdown guard | `apps/api/test/markdown.test.ts` | Vitest | `ticketImageIds` allow-list and de-duplication |
 | Knowledge permissions | `apps/api/test/knowledge.test.ts` | Vitest | Admin-only writes with audit, raster-only images, a session required for images |
-| **Integration** | `apps/api/test/integration.test.ts` | Vitest + real PostgreSQL (`RUN_INTEGRATION_TESTS=true`) | Tenant isolation, requesters cannot write internal notes, a foreign-organization session is rejected, ticket-image linking and visibility, internal-note images hidden from requesters, cursor pagination returns every ticket exactly once |
+| Announcement permissions | `apps/api/test/announcements.test.ts` | Vitest | Admin-only post, edit and delete with audit, kind and end-time validation, the active filter |
+| **Integration** | `apps/api/test/integration.test.ts` | Vitest + real PostgreSQL (`RUN_INTEGRATION_TESTS=true`) | Tenant isolation, requesters cannot write internal notes, a foreign-organization session is rejected, ticket-image linking and visibility, internal-note images hidden from requesters, announcements are admin-only, leave the banners once ended, stay inside the organization and reject stale edits, cursor pagination returns every ticket exactly once |
 | Web headers | `apps/web/test/request-headers.test.mjs` | `node:test` | Bodyless POSTs send `{}`, content type, caller headers preserved |
+| Web announcements | `apps/web/test/announcement-kinds.test.mjs` | `node:test` | Banner order (incident, maintenance, news), ended and dismissed banners hidden, edits re-shown, end-time round-trip |
 | Web rich content | `apps/web/test/rich-content.test.mjs` | `node:test` | Image reference round-trips, Markdown detection, excerpts, uploaded-image detection |
 | Load | `load-tests/baseline.js` | k6 | Constant-arrival-rate ticket listing with thresholds: error rate < 0.5 %, read p95 < 300 ms, rate-limited < 1 % |
 

@@ -4,6 +4,7 @@ export const roles = ["requester", "agent", "admin"] as const;
 export const statuses = ["open", "in_progress", "waiting", "closed"] as const;
 export const priorities = ["low", "normal", "high", "urgent"] as const;
 export const descriptionFormats = ["text", "markdown"] as const;
+export const announcementKinds = ["news", "maintenance", "incident"] as const;
 
 export const loginSchema = z.object({ email: z.email(), password: z.string().min(8).max(200) });
 export const createTicketSchema = z.object({
@@ -35,6 +36,13 @@ export const createArticleSchema = z.object({
   body: z.string().max(100_000)
 });
 export const updateArticleSchema = createArticleSchema.extend({ version: z.number().int().positive() });
+export const createAnnouncementSchema = z.object({
+  kind: z.enum(announcementKinds),
+  title: z.string().trim().min(3).max(200),
+  body: z.string().trim().min(1).max(5_000),
+  endsAt: z.iso.datetime({ offset: true }).nullable().default(null)
+});
+export const updateAnnouncementSchema = createAnnouncementSchema.extend({ version: z.number().int().positive() });
 export const imageUploadSchema = z.object({
   fileName: z.string().trim().min(1).max(255),
   contentType: z.enum(imageTypes),
@@ -43,3 +51,4 @@ export const imageUploadSchema = z.object({
 export type Role =(typeof roles)[number];
 export type TicketStatus = (typeof statuses)[number];
 export type Priority = (typeof priorities)[number];
+export type AnnouncementKind = (typeof announcementKinds)[number];

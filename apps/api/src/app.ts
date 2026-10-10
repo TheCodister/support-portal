@@ -7,7 +7,7 @@ import { HeadObjectCommand, GetObjectCommand, S3Client } from "@aws-sdk/client-s
 import { createPresignedPost } from "@aws-sdk/s3-presigned-post";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { z, ZodError } from "zod";
-import { attachmentRequestSchema, createArticleSchema, createCommentSchema, createTicketSchema, imageUploadSchema, loginSchema, updateArticleSchema, updateTicketSchema, type Role } from "@supportdesk/contracts";
+import { announcementKinds, attachmentRequestSchema, createAnnouncementSchema, createArticleSchema, createCommentSchema, createTicketSchema, imageUploadSchema, loginSchema, updateAnnouncementSchema, updateArticleSchema, updateTicketSchema, type Role } from "@supportdesk/contracts";
 import { createPool, transaction, type Database } from "@supportdesk/database";
 import { ticketImageIds } from "./markdown.js";
 import { token, tokenHash, verifyPassword } from "./security.js";
@@ -275,6 +275,42 @@ export async function buildApp(deps: Dependencies = {}): Promise<FastifyInstance
     const image = result.rows[0]; if (!image) throw httpError(404, "Image not found", "not_found");
     const url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: bucket, Key: image.object_key, ResponseContentType: image.content_type }), { expiresIn: 300 });
     return reply.header("cache-control", "private, max-age=240").header("cross-origin-resource-policy", "same-site").redirect(url, 302);
+  });
+
+  // Every member reads announcements; ?active=true keeps only those without a passed end time, for the workspace banners.
+  app.get("/v1/announcements", { preHandler: authenticate }, async (request) => {
+    const q = request.query as Record<string, string | undefined>; const limit = Math.min(Math.max(Number(q.limit) || 25, 1), MAX_PAGE); const cursor = parseCursor(q.cursor);
+    if (q.kind && !(announcementKinds as readonly string[]).includes(q.kind)) throw httpError(400, "Invalid kind filter", "validation_error");
+    const values: unknown[] = [request.auth.organizationId]; const conditions = ["n.organization_id=$1"];
+    if (q.kind) { values.push(q.kind); conditions.push(`n.kind=$${values.length}`); }
+    if (q.active === "true") conditions.push("(n.ends_at IS NULL OR n.ends_at>now())");
+    if (cursor) { values.push(cursor.createdAt, cursor.id); conditions.push(`(n.created_at,n.id)<($${values.length - 1},$${values.length})`); }
+    values.push(limit + 1);
+    const result = await db.query(`SELECT n.*,a.display_name author_name FROM announcements n JOIN users a ON a.id=n.author_id WHERE ${conditions.join(" AND ")} ORDER BY n.created_at DESC,n.id DESC LIMIT $${values.length}`, values);
+    const hasMore = result.rows.length > limit; const items = result.rows.slice(0, limit); return { items, nextCursor: hasMore ? makeCursor(items.at(-1)) : null };
+  });
+  app.post("/v1/announcements", { preHandler: authenticate }, async (request, reply) => {
+    requireAdmin(request); const input = createAnnouncementSchema.parse(request.body); const auth = request.auth;
+    const announcement = await transaction(db, async (client) => {
+      const result = await client.query("INSERT INTO announcements(organization_id,kind,title,body,ends_at,author_id,updated_by) VALUES($1,$2,$3,$4,$5,$6,$6) RETURNING *", [auth.organizationId, input.kind, input.title, input.body, input.endsAt, auth.userId]); const row = result.rows[0];
+      await client.query("INSERT INTO audit_events(organization_id,actor_id,action,entity_type,entity_id,data) VALUES($1,$2,'announcement.created','announcement',$3,$4)", [auth.organizationId, auth.userId, row.id, JSON.stringify({ kind: row.kind, title: row.title })]); return row;
+    }); return reply.status(201).send(announcement);
+  });
+  app.patch("/v1/announcements/:id", { preHandler: authenticate }, async (request) => {
+    requireAdmin(request); const id = idSchema.parse((request.params as { id: string }).id); const input = updateAnnouncementSchema.parse(request.body); const auth = request.auth;
+    return transaction(db, async (client) => {
+      const result = await client.query("UPDATE announcements SET kind=$4,title=$5,body=$6,ends_at=$7,updated_by=$8,version=version+1,updated_at=now() WHERE organization_id=$1 AND id=$2 AND version=$3 RETURNING *", [auth.organizationId, id, input.version, input.kind, input.title, input.body, input.endsAt, auth.userId]); const row = result.rows[0];
+      if (!row) { const exists = await client.query("SELECT 1 FROM announcements WHERE organization_id=$1 AND id=$2", [auth.organizationId, id]); throw httpError(exists.rowCount ? 409 : 404, exists.rowCount ? "Announcement was changed by another user" : "Announcement not found", exists.rowCount ? "version_conflict" : "not_found"); }
+      await client.query("INSERT INTO audit_events(organization_id,actor_id,action,entity_type,entity_id,data) VALUES($1,$2,'announcement.updated','announcement',$3,$4)", [auth.organizationId, auth.userId, id, JSON.stringify({ kind: row.kind, title: row.title, version: row.version })]); return row;
+    });
+  });
+  app.delete("/v1/announcements/:id", { preHandler: authenticate }, async (request, reply) => {
+    requireAdmin(request); const id = idSchema.parse((request.params as { id: string }).id); const auth = request.auth;
+    await transaction(db, async (client) => {
+      const result = await client.query("DELETE FROM announcements WHERE organization_id=$1 AND id=$2 RETURNING kind,title", [auth.organizationId, id]); const row = result.rows[0];
+      if (!row) throw httpError(404, "Announcement not found", "not_found");
+      await client.query("INSERT INTO audit_events(organization_id,actor_id,action,entity_type,entity_id,data) VALUES($1,$2,'announcement.deleted','announcement',$3,$4)", [auth.organizationId, auth.userId, id, JSON.stringify({ kind: row.kind, title: row.title })]);
+    }); return reply.status(204).send();
   });
   return app;
 }

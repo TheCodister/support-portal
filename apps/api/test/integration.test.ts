@@ -57,6 +57,27 @@ describe.runIf(process.env.RUN_INTEGRATION_TESTS === "true")("tenant and visibil
     const hidden = await app.inject({ method: "GET", url: `/v1/knowledge/articles/${id}`, headers: { cookie: globexCookie, "x-organization-id": globexOrg } });
     expect(hidden.statusCode).toBe(404);
   });
+  it("lets only admins post announcements, hides ended ones from the banners, and keeps them inside the organization", async () => {
+    const requesterHeaders = { cookie: acmeCookie, "x-csrf-token": acmeCsrf, "x-organization-id": acmeOrg };
+    const payload = { kind: "incident", title: `Login outage ${crypto.randomUUID()}`, body: "We are investigating." };
+    expect((await app.inject({ method: "POST", url: "/v1/announcements", headers: requesterHeaders, payload })).statusCode).toBe(403);
+    const admin = await login("admin@acme.test");
+    const adminHeaders = { cookie: admin.cookie, "x-csrf-token": admin.csrf, "x-organization-id": acmeOrg };
+    const created = await app.inject({ method: "POST", url: "/v1/announcements", headers: adminHeaders, payload });
+    expect(created.statusCode).toBe(201);
+    const { id, version } = created.json();
+    const active = async () => (await app.inject({ method: "GET", url: "/v1/announcements?active=true&limit=100", headers: requesterHeaders })).json().items.map((item: { id: string }) => item.id);
+    expect(await active()).toContain(id);
+    const ended = await app.inject({ method: "PATCH", url: `/v1/announcements/${id}`, headers: adminHeaders, payload: { ...payload, endsAt: new Date(Date.now() - 60_000).toISOString(), version } });
+    expect(ended.statusCode).toBe(200);
+    expect(await active()).not.toContain(id);
+    const stale = await app.inject({ method: "PATCH", url: `/v1/announcements/${id}`, headers: adminHeaders, payload: { ...payload, version } });
+    expect(stale.statusCode).toBe(409);
+    const globex = (await app.inject({ method: "GET", url: "/v1/announcements?limit=100", headers: { cookie: globexCookie, "x-organization-id": globexOrg } })).json().items.map((item: { id: string }) => item.id);
+    expect(globex).not.toContain(id);
+    expect((await app.inject({ method: "DELETE", url: `/v1/announcements/${id}`, headers: { cookie: globexCookie, "x-csrf-token": globexCsrf, "x-organization-id": globexOrg } })).statusCode).toBe(404);
+    expect((await app.inject({ method: "DELETE", url: `/v1/announcements/${id}`, headers: adminHeaders })).statusCode).toBe(204);
+  });
   it("links ticket images to the new ticket and limits who can view them", async () => {
     const requesterHeaders = { cookie: acmeCookie, "x-csrf-token": acmeCsrf, "x-organization-id": acmeOrg };
     const db = (app as unknown as { db: { query: (sql: string, values: unknown[]) => Promise<unknown> } }).db;
